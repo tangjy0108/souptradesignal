@@ -1,0 +1,5 @@
+{
+  "name": "QuantView Trading Terminal",
+  "description": "A TradingView-like application with live charts, indicators, and custom trading strategies.",
+  "requestFramePermissions": []
+}
