@@ -4,6 +4,125 @@ import { sendTelegram } from './_telegram.js';
 const recentlySentDivergence = new Set();
 const recentlySentLQ         = new Set();
 const recentlySentAlert      = new Set(); // FVG/SNR 接近/突破預警
+const recentlySentKillzone   = new Set();
+
+function getTimePartsInZone(date, timeZone = 'America/New_York') {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    weekday: 'short',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(date);
+
+  const map = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const hour = Number(map.hour || 0);
+  const minute = Number(map.minute || 0);
+
+  return {
+    hour,
+    minute,
+    minuteOfDay: hour * 60 + minute,
+    weekday: weekdayMap[map.weekday] ?? 0,
+    dateKey: `${map.year}-${map.month}-${map.day}`,
+  };
+}
+
+function inSession(minuteOfDay, startMinute, endMinute) {
+  return startMinute < endMinute
+    ? minuteOfDay >= startMinute && minuteOfDay < endMinute
+    : minuteOfDay >= startMinute || minuteOfDay < endMinute;
+}
+
+function getCronContext(now = new Date()) {
+  const et = getTimePartsInZone(now, 'America/New_York');
+  const isWeekday = et.weekday >= 1 && et.weekday <= 5;
+  const isQuarterHour = now.getUTCMinutes() % 15 === 0;
+  const inLondonKillzone = isWeekday && inSession(et.minuteOfDay, 2 * 60, 5 * 60);
+  const inNyKillzone = isWeekday && inSession(et.minuteOfDay, 8 * 60 + 30, 11 * 60);
+  const inNyOpeningRange = isWeekday && inSession(et.minuteOfDay, 9 * 60 + 30, 10 * 60);
+
+  return {
+    et,
+    isWeekday,
+    isQuarterHour,
+    inLondonKillzone,
+    inNyKillzone,
+    inNyOpeningRange,
+    afterOpeningRange: inNyKillzone && et.minuteOfDay >= 10 * 60,
+  };
+}
+
+function calcEMA(values, period) {
+  const ema = new Array(values.length).fill(null);
+  if (values.length < period) return ema;
+  const k = 2 / (period + 1);
+  let sum = 0;
+  for (let i = 0; i < period; i++) sum += values[i];
+  ema[period - 1] = sum / period;
+  for (let i = period; i < values.length; i++) {
+    ema[i] = values[i] * k + ema[i - 1] * (1 - k);
+  }
+  return ema;
+}
+
+function calcATRFromKlines(klines, period = 14) {
+  const trs = klines.map((bar, i) => {
+    if (i === 0) return bar.high - bar.low;
+    const prevClose = klines[i - 1].close;
+    return Math.max(
+      bar.high - bar.low,
+      Math.abs(bar.high - prevClose),
+      Math.abs(bar.low - prevClose)
+    );
+  });
+  const atr = new Array(klines.length).fill(null);
+  if (klines.length <= period) return atr;
+  let sum = 0;
+  for (let i = 1; i <= period; i++) sum += trs[i];
+  atr[period] = sum / period;
+  for (let i = period + 1; i < trs.length; i++) {
+    atr[i] = (atr[i - 1] * (period - 1) + trs[i]) / period;
+  }
+  return atr;
+}
+
+function findLatestIndexAtOrBefore(klines, time) {
+  for (let i = klines.length - 1; i >= 0; i--) {
+    if (klines[i].time <= time) return i;
+  }
+  return -1;
+}
+
+function getKillzoneSession(time) {
+  const et = getTimePartsInZone(new Date(time), 'America/New_York');
+  const isWeekday = et.weekday >= 1 && et.weekday <= 5;
+  if (inSession(et.minuteOfDay, 20 * 60, 0)) return 'Asia';
+  if (isWeekday && inSession(et.minuteOfDay, 2 * 60, 5 * 60)) return 'London';
+  if (isWeekday && inSession(et.minuteOfDay, 8 * 60 + 30, 11 * 60)) return 'New York';
+  return 'Off-Hours';
+}
+
+async function safeSendTelegram(message, sendErrors, tag) {
+  if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
+    const error = 'Telegram env vars not set';
+    if (!sendErrors.includes(error)) sendErrors.push(error);
+    return false;
+  }
+  try {
+    await sendTelegram(message);
+    return true;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`Telegram send failed [${tag}]`, msg);
+    sendErrors.push(`[${tag}] ${msg}`);
+    return false;
+  }
+}
 
 // ── SNR+FVG 核心邏輯（對應 snrFvg.ts）──
 function sma(arr, period) {
@@ -256,6 +375,293 @@ async function runSNRFVGScan() {
   return signals;
 }
 
+async function runICTKillzoneOpt3Scan(now = new Date()) {
+  const ctx = getCronContext(now);
+  if (!ctx.inLondonKillzone && !ctx.inNyKillzone) return [];
+
+  const signals = [];
+
+  await Promise.all(SCAN_SYMBOLS.map(async sym => {
+    try {
+      const [k5, k1h, k1d] = await Promise.all([
+        fetchKlines(sym, '5m', 320),
+        fetchKlines(sym, '1h', 120),
+        fetchKlines(sym, '1d', 10),
+      ]);
+
+      if (!k5 || !k1h || !k1d || k5.length < 80 || k1h.length < 60 || k1d.length < 2) return;
+
+      const current = k5[k5.length - 1];
+      const prev = k5[k5.length - 2];
+      const prev2 = k5[k5.length - 3];
+      if (!current || !prev || !prev2) return;
+
+      const currentSession = getKillzoneSession(current.time);
+      if (currentSession !== 'London' && currentSession !== 'New York') return;
+
+      const et = getTimePartsInZone(new Date(current.time), 'America/New_York');
+      const inLondon = currentSession === 'London';
+      const inNyWindow = currentSession === 'New York';
+      const afterOpeningRange = inNyWindow && et.minuteOfDay >= 10 * 60;
+
+      const atrSeries = calcATRFromKlines(k5, 14);
+      const atr = atrSeries[k5.length - 1];
+      if (!atr) return;
+
+      const emaFastSeries = calcEMA(k1h.map(bar => bar.close), 20);
+      const emaSlowSeries = calcEMA(k1h.map(bar => bar.close), 50);
+      const h1Idx = findLatestIndexAtOrBefore(k1h, current.time);
+      const d1Idx = findLatestIndexAtOrBefore(k1d, current.time);
+      const h1Fast = h1Idx >= 0 ? emaFastSeries[h1Idx] : null;
+      const h1Slow = h1Idx >= 0 ? emaSlowSeries[h1Idx] : null;
+      const dailyOpen = d1Idx >= 0 ? k1d[d1Idx].open : current.open;
+
+      const bullBias = !!(h1Fast && h1Slow && h1Fast > h1Slow);
+      const bearBias = !!(h1Fast && h1Slow && h1Fast < h1Slow);
+
+      let asiaHigh = 0;
+      let asiaLow = 0;
+      let orHigh = 0;
+      let orLow = 0;
+      let prevInAsia = false;
+      let prevNyWindow = false;
+
+      for (const bar of k5) {
+        const barEt = getTimePartsInZone(new Date(bar.time), 'America/New_York');
+        const barIsWeekday = barEt.weekday >= 1 && barEt.weekday <= 5;
+        const barInAsia = inSession(barEt.minuteOfDay, 20 * 60, 0);
+        const barInNyWindow = barIsWeekday && inSession(barEt.minuteOfDay, 8 * 60 + 30, 11 * 60);
+        const barInOpeningRange = barIsWeekday && inSession(barEt.minuteOfDay, 9 * 60 + 30, 10 * 60);
+
+        if (barInAsia && !prevInAsia) {
+          asiaHigh = bar.high;
+          asiaLow = bar.low;
+        } else if (barInAsia) {
+          asiaHigh = Math.max(asiaHigh, bar.high);
+          asiaLow = Math.min(asiaLow, bar.low);
+        }
+
+        if (barInNyWindow && !prevNyWindow) {
+          orHigh = 0;
+          orLow = 0;
+        }
+        if (barInOpeningRange) {
+          orHigh = orHigh === 0 ? bar.high : Math.max(orHigh, bar.high);
+          orLow = orLow === 0 ? bar.low : Math.min(orLow, bar.low);
+        }
+
+        prevInAsia = barInAsia;
+        prevNyWindow = barInNyWindow;
+      }
+
+      const currentClose = current.close;
+      const bodySize = Math.abs(current.close - current.open);
+      const sweepBuffer = atr * 0.10;
+      const stopBuffer = atr * 0.20;
+      const highs = k5.map(bar => bar.high);
+      const lows = k5.map(bar => bar.low);
+      const bullMssLevel = Math.max(...highs.slice(Math.max(0, k5.length - 4), k5.length - 1));
+      const bearMssLevel = Math.min(...lows.slice(Math.max(0, k5.length - 4), k5.length - 1));
+      const bullMss = currentClose > bullMssLevel;
+      const bearMss = currentClose < bearMssLevel;
+      const bullDisplacement = current.close > current.open && bodySize >= atr * 0.5;
+      const bearDisplacement = current.close < current.open && bodySize >= atr * 0.5;
+      const bullFvg = current.low > prev2.high;
+      const bearFvg = current.high < prev2.low;
+      const bullConfirm = bullDisplacement && bullMss;
+      const bearConfirm = bearDisplacement && bearMss;
+      const recent = k5.slice(-11);
+
+      const londonBullSweeps = inLondon && asiaLow > 0 ? recent.filter(bar => bar.low < asiaLow - sweepBuffer) : [];
+      const londonBearSweeps = inLondon && asiaHigh > 0 ? recent.filter(bar => bar.high > asiaHigh + sweepBuffer) : [];
+      const nyBullReversalSweeps = afterOpeningRange && orLow > 0 ? recent.filter(bar => bar.low < orLow - sweepBuffer) : [];
+      const nyBearReversalSweeps = afterOpeningRange && orHigh > 0 ? recent.filter(bar => bar.high > orHigh + sweepBuffer) : [];
+
+      let signal = null;
+
+      if (inLondon && bullBias && bullConfirm && londonBullSweeps.length > 0) {
+        const extreme = Math.min(...londonBullSweeps.map(bar => bar.low));
+        const entry = currentClose;
+        const stop = extreme - stopBuffer;
+        const target = entry + (entry - stop) * 2.0;
+        signal = {
+          sym,
+          direction: 'LONG',
+          setupType: 'LONDON_REVERSAL',
+          currentSession,
+          bias: 'BULLISH',
+          price: currentClose,
+          entry,
+          stop,
+          target,
+          rr: Math.abs(target - entry) / Math.max(Math.abs(entry - stop), 0.0000001),
+          asiaHigh,
+          asiaLow,
+          orHigh,
+          orLow,
+          sweepSide: 'ASIA_LOW',
+          sweepLevel: asiaLow,
+          sweepExtreme: extreme,
+          mssLevel: bullMssLevel,
+          fvgLow: bullFvg ? prev2.high : 0,
+          fvgHigh: bullFvg ? current.low : 0,
+          dailyOpen,
+        };
+      } else if (inLondon && bearBias && bearConfirm && londonBearSweeps.length > 0) {
+        const extreme = Math.max(...londonBearSweeps.map(bar => bar.high));
+        const entry = currentClose;
+        const stop = extreme + stopBuffer;
+        const target = entry - (stop - entry) * 2.0;
+        signal = {
+          sym,
+          direction: 'SHORT',
+          setupType: 'LONDON_REVERSAL',
+          currentSession,
+          bias: 'BEARISH',
+          price: currentClose,
+          entry,
+          stop,
+          target,
+          rr: Math.abs(entry - target) / Math.max(Math.abs(stop - entry), 0.0000001),
+          asiaHigh,
+          asiaLow,
+          orHigh,
+          orLow,
+          sweepSide: 'ASIA_HIGH',
+          sweepLevel: asiaHigh,
+          sweepExtreme: extreme,
+          mssLevel: bearMssLevel,
+          fvgLow: bearFvg ? current.high : 0,
+          fvgHigh: bearFvg ? prev2.low : 0,
+          dailyOpen,
+        };
+      } else if (afterOpeningRange && bullBias && bullConfirm && bullFvg && nyBullReversalSweeps.length > 0 && currentClose > orLow) {
+        const extreme = Math.min(...nyBullReversalSweeps.map(bar => bar.low));
+        const entry = currentClose;
+        const stop = extreme - stopBuffer;
+        const target = entry + (entry - stop) * 2.0;
+        signal = {
+          sym,
+          direction: 'LONG',
+          setupType: 'NY_REVERSAL',
+          currentSession,
+          bias: 'BULLISH',
+          price: currentClose,
+          entry,
+          stop,
+          target,
+          rr: Math.abs(target - entry) / Math.max(Math.abs(entry - stop), 0.0000001),
+          asiaHigh,
+          asiaLow,
+          orHigh,
+          orLow,
+          sweepSide: 'OR_LOW',
+          sweepLevel: orLow,
+          sweepExtreme: extreme,
+          mssLevel: bullMssLevel,
+          fvgLow: prev2.high,
+          fvgHigh: current.low,
+          dailyOpen,
+        };
+      } else if (afterOpeningRange && bearBias && bearConfirm && nyBearReversalSweeps.length > 0 && currentClose < orHigh) {
+        const extreme = Math.max(...nyBearReversalSweeps.map(bar => bar.high));
+        const entry = currentClose;
+        const stop = extreme + stopBuffer;
+        const target = entry - (stop - entry) * 2.0;
+        signal = {
+          sym,
+          direction: 'SHORT',
+          setupType: 'NY_REVERSAL',
+          currentSession,
+          bias: 'BEARISH',
+          price: currentClose,
+          entry,
+          stop,
+          target,
+          rr: Math.abs(entry - target) / Math.max(Math.abs(stop - entry), 0.0000001),
+          asiaHigh,
+          asiaLow,
+          orHigh,
+          orLow,
+          sweepSide: 'OR_HIGH',
+          sweepLevel: orHigh,
+          sweepExtreme: extreme,
+          mssLevel: bearMssLevel,
+          fvgLow: bearFvg ? current.high : 0,
+          fvgHigh: bearFvg ? prev2.low : 0,
+          dailyOpen,
+        };
+      } else if (afterOpeningRange && bullBias && bullConfirm && bullFvg && orHigh > 0 && currentClose > orHigh && prev.close <= orHigh) {
+        const entry = currentClose;
+        const stop = Math.min(orLow || current.low, prev.low, prev2.low) - stopBuffer;
+        const target = entry + (entry - stop) * 2.0;
+        signal = {
+          sym,
+          direction: 'LONG',
+          setupType: 'NY_CONTINUATION',
+          currentSession,
+          bias: 'BULLISH',
+          price: currentClose,
+          entry,
+          stop,
+          target,
+          rr: Math.abs(target - entry) / Math.max(Math.abs(entry - stop), 0.0000001),
+          asiaHigh,
+          asiaLow,
+          orHigh,
+          orLow,
+          sweepSide: 'OR_HIGH',
+          sweepLevel: orHigh,
+          sweepExtreme: current.high,
+          mssLevel: bullMssLevel,
+          fvgLow: prev2.high,
+          fvgHigh: current.low,
+          dailyOpen,
+        };
+      } else if (afterOpeningRange && bearBias && bearConfirm && orLow > 0 && currentClose < orLow && prev.close >= orLow) {
+        const entry = currentClose;
+        const stop = Math.max(orHigh || current.high, prev.high, prev2.high) + stopBuffer;
+        const target = entry - (stop - entry) * 2.0;
+        signal = {
+          sym,
+          direction: 'SHORT',
+          setupType: 'NY_CONTINUATION',
+          currentSession,
+          bias: 'BEARISH',
+          price: currentClose,
+          entry,
+          stop,
+          target,
+          rr: Math.abs(entry - target) / Math.max(Math.abs(stop - entry), 0.0000001),
+          asiaHigh,
+          asiaLow,
+          orHigh,
+          orLow,
+          sweepSide: 'OR_LOW',
+          sweepLevel: orLow,
+          sweepExtreme: current.low,
+          mssLevel: bearMssLevel,
+          fvgLow: bearFvg ? current.high : 0,
+          fvgHigh: bearFvg ? prev2.low : 0,
+          dailyOpen,
+        };
+      }
+
+      if (!signal) return;
+
+      const signalEt = getTimePartsInZone(new Date(current.time), 'America/New_York');
+      const signalKey = `${signal.sym}_${signal.setupType}_${signal.direction}_${signalEt.dateKey}_${signal.currentSession}`;
+      if (recentlySentKillzone.has(signalKey)) return;
+
+      recentlySentKillzone.add(signalKey);
+      setTimeout(() => recentlySentKillzone.delete(signalKey), 6 * 60 * 60 * 1000);
+      signals.push(signal);
+    } catch (_) {}
+  }));
+
+  return signals;
+}
+
 // 4H 背離掃描
 async function runDivergenceScan() {
   const alerts = [];
@@ -290,75 +696,133 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-
-  const twTime = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' });
+  const now = new Date();
+  const ctx = getCronContext(now);
+  const twTime = now.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' });
+  const etTime = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
+  const sendErrors = [];
 
   try {
-    // ── 1. SNR+FVG LQ 訊號掃描（每 15 分鐘）──
-    const lqSignals = await runSNRFVGScan();
-    for (const s of lqSignals) {
-      const emoji = s.direction === 'LONG' ? '🟢' : '🔴';
-      const msg = [
-        `${emoji} <b>${s.sym} LQ 獵取訊號</b>`,
-        `方向：<b>${s.direction}</b>`,
-        ``,
-        `💰 入場：<code>${fmt(s.entry)}</code>`,
-        `🛡️ 止損：<code>${fmt(s.stop)}</code>`,
-        `🎯 目標(1:1)：<code>${fmt(s.target)}</code>`,
-        ``,
-        `📌 SNR 區域 ${s.snrCount} 個 | FVG 缺口 ${s.fvgCount} 個`,
-        `⏰ ${twTime}`,
-      ].join('\n');
-      await sendTelegram(msg);
-    }
+    let lqSignals = [];
+    let divAlerts = [];
+    let alertSignals = [];
+    let killzoneSignals = [];
 
-    // ── 2. 4H 背離通知（每 15 分鐘，有才發）──
-    const divAlerts = await runDivergenceScan();
-    for (const a of divAlerts) {
-      const emoji = a.div4h.includes('BULL') ? '📈' : '📉';
-      const confirmed = a.div4h.startsWith('CONFIRMED');
-      const msg = [
-        `${emoji} <b>${a.sym} 4H RSI 背離</b>`,
-        confirmed ? `🔴 <b>已確立，注意！</b>` : `⚠️ 潛在背離形成中`,
-        ``,
-        `4H：${divLabel(a.div4h)}`,
-        a.div1h  ? `1H：${divLabel(a.div1h)}`  : '',
-        a.div15m ? `15m：${divLabel(a.div15m)}` : '',
-        ``,
-        `💰 目前價格：<code>${fmt(a.price)}</code>`,
-        `⏰ ${twTime}`,
-      ].filter(Boolean).join('\n');
-      await sendTelegram(msg);
-    }
-
-    // ── 3. FVG/SNR 接近/突破預警 ──
-    const alertSignals = await runAlertScan();
-    for (const a of alertSignals) {
-      const typeLabel = a.type === 'broke' ? '已突破' : '正在接近';
-      let msg;
-      if (a.level !== undefined) {
-        // SNR
-        msg = [
-          `${a.emoji} <b>${a.sym} ${typeLabel} ${a.label}</b>`,
+    if (ctx.isQuarterHour) {
+      lqSignals = await runSNRFVGScan();
+      for (const s of lqSignals) {
+        const emoji = s.direction === 'LONG' ? '🟢' : '🔴';
+        const msg = [
+          `${emoji} <b>${s.sym} LQ 獵取訊號</b>`,
+          `方向：<b>${s.direction}</b>`,
           ``,
-          `📍 位置：<code>${fmt(a.level)}</code>`,
-          `💰 目前價格：<code>${fmt(a.price)}</code>`,
+          `💰 入場：<code>${fmt(s.entry)}</code>`,
+          `🛡️ 止損：<code>${fmt(s.stop)}</code>`,
+          `🎯 目標(1:1)：<code>${fmt(s.target)}</code>`,
+          ``,
+          `📌 SNR 區域 ${s.snrCount} 個 | FVG 缺口 ${s.fvgCount} 個`,
           `⏰ ${twTime}`,
         ].join('\n');
-      } else {
-        // FVG
-        msg = [
-          `${a.emoji} <b>${a.sym} ${typeLabel} ${a.label}</b>`,
-          ``,
-          `📦 區間：<code>${fmt(a.low)} – ${fmt(a.high)}</code>`,
-          `💰 目前價格：<code>${fmt(a.price)}</code>`,
-          `⏰ ${twTime}`,
-        ].join('\n');
+        await safeSendTelegram(msg, sendErrors, 'lq');
       }
-      await sendTelegram(msg);
+
+      divAlerts = await runDivergenceScan();
+      for (const a of divAlerts) {
+        const emoji = a.div4h.includes('BULL') ? '📈' : '📉';
+        const confirmed = a.div4h.startsWith('CONFIRMED');
+        const msg = [
+          `${emoji} <b>${a.sym} 4H RSI 背離</b>`,
+          confirmed ? `🔴 <b>已確立，注意！</b>` : `⚠️ 潛在背離形成中`,
+          ``,
+          `4H：${divLabel(a.div4h)}`,
+          a.div1h  ? `1H：${divLabel(a.div1h)}`  : '',
+          a.div15m ? `15m：${divLabel(a.div15m)}` : '',
+          ``,
+          `💰 目前價格：<code>${fmt(a.price)}</code>`,
+          `⏰ ${twTime}`,
+        ].filter(Boolean).join('\n');
+        await safeSendTelegram(msg, sendErrors, 'divergence');
+      }
+
+      alertSignals = await runAlertScan();
+      for (const a of alertSignals) {
+        const typeLabel = a.type === 'broke' ? '已突破' : '正在接近';
+        let msg;
+        if (a.level !== undefined) {
+          msg = [
+            `${a.emoji} <b>${a.sym} ${typeLabel} ${a.label}</b>`,
+            ``,
+            `📍 位置：<code>${fmt(a.level)}</code>`,
+            `💰 目前價格：<code>${fmt(a.price)}</code>`,
+            `⏰ ${twTime}`,
+          ].join('\n');
+        } else {
+          msg = [
+            `${a.emoji} <b>${a.sym} ${typeLabel} ${a.label}</b>`,
+            ``,
+            `📦 區間：<code>${fmt(a.low)} – ${fmt(a.high)}</code>`,
+            `💰 目前價格：<code>${fmt(a.price)}</code>`,
+            `⏰ ${twTime}`,
+          ].join('\n');
+        }
+        await safeSendTelegram(msg, sendErrors, 'alert');
+      }
     }
 
-    res.status(200).json({ ok: true, lq: lqSignals.length, divergence: divAlerts.length, alerts: alertSignals.length });
+    if (ctx.inLondonKillzone || ctx.inNyKillzone) {
+      killzoneSignals = await runICTKillzoneOpt3Scan(now);
+      for (const s of killzoneSignals) {
+        const emoji = s.direction === 'LONG' ? '🟢' : '🔴';
+        const fvgText = s.fvgLow > 0 && s.fvgHigh > 0
+          ? `📦 FVG：<code>${fmt(s.fvgLow)} – ${fmt(s.fvgHigh)}</code>`
+          : `📦 FVG：<code>無</code>`;
+        const msg = [
+          `${emoji} <b>${s.sym} ICT Killzone Opt3</b>`,
+          `Session：<b>${s.currentSession}</b> | Setup：<b>${s.setupType}</b>`,
+          `Bias：<b>${s.bias}</b>`,
+          ``,
+          `💰 現價：<code>${fmt(s.price)}</code>`,
+          `📍 Entry：<code>${fmt(s.entry)}</code>`,
+          `🛡️ Stop：<code>${fmt(s.stop)}</code>`,
+          `🎯 Target：<code>${fmt(s.target)}</code>`,
+          `⚖️ R/R：<code>${s.rr.toFixed(2)}</code>`,
+          ``,
+          `🌏 Asia：<code>${fmt(s.asiaLow)} – ${fmt(s.asiaHigh)}</code>`,
+          s.orHigh > 0 && s.orLow > 0 ? `🗽 OR：<code>${fmt(s.orLow)} – ${fmt(s.orHigh)}</code>` : '',
+          `🪤 Sweep：<code>${s.sweepSide}</code> @ <code>${fmt(s.sweepLevel)}</code>`,
+          `📉 MSS：<code>${fmt(s.mssLevel)}</code>`,
+          fvgText,
+          `⏰ TW ${twTime}`,
+          `⏰ ET ${etTime}`,
+        ].filter(Boolean).join('\n');
+        await safeSendTelegram(msg, sendErrors, 'killzone');
+      }
+    }
+
+    res.status(200).json({
+      ok: sendErrors.length === 0,
+      nowTw: twTime,
+      nowEt: etTime,
+      windows: {
+        isQuarterHour: ctx.isQuarterHour,
+        inLondonKillzone: ctx.inLondonKillzone,
+        inNyKillzone: ctx.inNyKillzone,
+        inNyOpeningRange: ctx.inNyOpeningRange,
+      },
+      ran: {
+        lq: ctx.isQuarterHour,
+        divergence: ctx.isQuarterHour,
+        alerts: ctx.isQuarterHour,
+        killzone: ctx.inLondonKillzone || ctx.inNyKillzone,
+      },
+      counts: {
+        lq: lqSignals.length,
+        divergence: divAlerts.length,
+        alerts: alertSignals.length,
+        killzone: killzoneSignals.length,
+      },
+      sendErrors,
+    });
   } catch (err) {
     console.error('Cron error:', err);
     res.status(500).json({ error: err.message });
