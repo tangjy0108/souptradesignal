@@ -5,6 +5,7 @@ const recentlySentDivergence = new Set();
 const recentlySentLQ         = new Set();
 const recentlySentAlert      = new Set(); // FVG/SNR 接近/突破預警
 const recentlySentKillzone   = new Set();
+const recentlySentSessionLiquidity = new Set();
 
 function getTimePartsInZone(date, timeZone = 'America/New_York') {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -42,17 +43,21 @@ function getCronContext(now = new Date()) {
   const et = getTimePartsInZone(now, 'America/New_York');
   const isWeekday = et.weekday >= 1 && et.weekday <= 5;
   const isQuarterHour = now.getUTCMinutes() % 15 === 0;
+  const inAsiaSession = inSession(et.minuteOfDay, 20 * 60, 0);
   const inLondonKillzone = isWeekday && inSession(et.minuteOfDay, 2 * 60, 5 * 60);
   const inNyKillzone = isWeekday && inSession(et.minuteOfDay, 8 * 60 + 30, 11 * 60);
   const inNyOpeningRange = isWeekday && inSession(et.minuteOfDay, 9 * 60 + 30, 10 * 60);
+  const activeKillzoneSession = inAsiaSession ? 'Asia' : inLondonKillzone ? 'London' : inNyKillzone ? 'New York' : 'Off-Hours';
 
   return {
     et,
     isWeekday,
     isQuarterHour,
+    inAsiaSession,
     inLondonKillzone,
     inNyKillzone,
     inNyOpeningRange,
+    activeKillzoneSession,
     afterOpeningRange: inNyKillzone && et.minuteOfDay >= 10 * 60,
   };
 }
@@ -105,6 +110,52 @@ function getKillzoneSession(time) {
   if (isWeekday && inSession(et.minuteOfDay, 2 * 60, 5 * 60)) return 'London';
   if (isWeekday && inSession(et.minuteOfDay, 8 * 60 + 30, 11 * 60)) return 'New York';
   return 'Off-Hours';
+}
+
+function getRollingTargetSession(currentSession) {
+  if (currentSession === 'Asia') return 'New York';
+  if (currentSession === 'London') return 'Asia';
+  if (currentSession === 'New York') return 'London';
+  return null;
+}
+
+function buildKillzoneRanges(klines) {
+  const ranges = [];
+  let active = null;
+
+  for (const bar of klines) {
+    const session = getKillzoneSession(bar.time);
+    if (session === 'Off-Hours') {
+      if (active) {
+        ranges.push(active);
+        active = null;
+      }
+      continue;
+    }
+
+    const et = getTimePartsInZone(new Date(bar.time), 'America/New_York');
+    const sessionKey = `${session}_${et.dateKey}`;
+
+    if (!active || active.sessionKey !== sessionKey) {
+      if (active) ranges.push(active);
+      active = {
+        session,
+        dateKey: et.dateKey,
+        sessionKey,
+        startTime: bar.time,
+        endTime: bar.time,
+        high: bar.high,
+        low: bar.low,
+      };
+    } else {
+      active.high = Math.max(active.high, bar.high);
+      active.low = Math.min(active.low, bar.low);
+      active.endTime = bar.time;
+    }
+  }
+
+  if (active) ranges.push(active);
+  return ranges;
 }
 
 async function safeSendTelegram(message, sendErrors, tag) {
@@ -662,6 +713,88 @@ async function runICTKillzoneOpt3Scan(now = new Date()) {
   return signals;
 }
 
+async function runSessionLiquidityScan(now = new Date()) {
+  const currentSession = getKillzoneSession(now.getTime());
+  const targetSession = getRollingTargetSession(currentSession);
+  if (!targetSession) return [];
+
+  const alerts = [];
+
+  await Promise.all(SCAN_SYMBOLS.map(async sym => {
+    try {
+      const k5 = await fetchKlines(sym, '5m', 420);
+      if (!k5 || k5.length < 80) return;
+
+      const current = k5[k5.length - 1];
+      const prev = k5[k5.length - 2];
+      if (!current || !prev) return;
+
+      const barSession = getKillzoneSession(current.time);
+      if (barSession !== currentSession) return;
+
+      const ranges = buildKillzoneRanges(k5);
+      const targetRange = [...ranges]
+        .reverse()
+        .find(range => range.session === targetSession && range.endTime < current.time);
+
+      if (!targetRange) return;
+
+      let event = null;
+
+      if (current.high > targetRange.high && current.close <= targetRange.high && prev.high <= targetRange.high) {
+        event = {
+          side: 'HIGH',
+          type: 'SWEEP_HIGH',
+          level: targetRange.high,
+          extreme: current.high,
+        };
+      } else if (current.close > targetRange.high && prev.close <= targetRange.high) {
+        event = {
+          side: 'HIGH',
+          type: 'BREAKOUT_HIGH',
+          level: targetRange.high,
+          extreme: current.high,
+        };
+      } else if (current.low < targetRange.low && current.close >= targetRange.low && prev.low >= targetRange.low) {
+        event = {
+          side: 'LOW',
+          type: 'SWEEP_LOW',
+          level: targetRange.low,
+          extreme: current.low,
+        };
+      } else if (current.close < targetRange.low && prev.close >= targetRange.low) {
+        event = {
+          side: 'LOW',
+          type: 'BREAKDOWN_LOW',
+          level: targetRange.low,
+          extreme: current.low,
+        };
+      }
+
+      if (!event) return;
+
+      const dedupeKey = `${sym}_${targetRange.sessionKey}_${event.side}`;
+      if (recentlySentSessionLiquidity.has(dedupeKey)) return;
+
+      recentlySentSessionLiquidity.add(dedupeKey);
+      setTimeout(() => recentlySentSessionLiquidity.delete(dedupeKey), 36 * 60 * 60 * 1000);
+
+      alerts.push({
+        sym,
+        currentSession,
+        targetSession: targetRange.session,
+        targetSessionKey: targetRange.sessionKey,
+        targetHigh: targetRange.high,
+        targetLow: targetRange.low,
+        price: current.close,
+        ...event,
+      });
+    } catch (_) {}
+  }));
+
+  return alerts;
+}
+
 // 4H 背離掃描
 async function runDivergenceScan() {
   const alerts = [];
@@ -707,6 +840,7 @@ export default async function handler(req, res) {
     let divAlerts = [];
     let alertSignals = [];
     let killzoneSignals = [];
+    let sessionLiquiditySignals = [];
 
     if (ctx.isQuarterHour) {
       lqSignals = await runSNRFVGScan();
@@ -799,27 +933,60 @@ export default async function handler(req, res) {
       }
     }
 
+    if (ctx.activeKillzoneSession !== 'Off-Hours') {
+      sessionLiquiditySignals = await runSessionLiquidityScan(now);
+      for (const s of sessionLiquiditySignals) {
+        const isBullishEvent = s.type === 'BREAKOUT_HIGH' || s.type === 'SWEEP_LOW';
+        const emoji = isBullishEvent ? '🟢' : '🔴';
+        const eventLabel =
+          s.type === 'BREAKOUT_HIGH' ? '突破前高' :
+          s.type === 'BREAKDOWN_LOW' ? '跌破前低' :
+          s.type === 'SWEEP_HIGH' ? '掃前高後收回' :
+          '掃前低後收回';
+        const msg = [
+          `${emoji} <b>${s.sym} Session Liquidity</b>`,
+          `當前時段：<b>${s.currentSession}</b> | 目標：<b>${s.targetSession}</b>`,
+          `事件：<b>${eventLabel}</b>`,
+          ``,
+          `📍 ${s.targetSession} High：<code>${fmt(s.targetHigh)}</code>`,
+          `📍 ${s.targetSession} Low：<code>${fmt(s.targetLow)}</code>`,
+          `🎯 觸發位：<code>${fmt(s.level)}</code>`,
+          `🪤 Extreme：<code>${fmt(s.extreme)}</code>`,
+          `💰 現價：<code>${fmt(s.price)}</code>`,
+          ``,
+          `🔁 同一個 ${s.targetSession} 區間的 ${s.side} 只提醒一次`,
+          `⏰ TW ${twTime}`,
+          `⏰ ET ${etTime}`,
+        ].join('\n');
+        await safeSendTelegram(msg, sendErrors, 'session_liquidity');
+      }
+    }
+
     res.status(200).json({
       ok: sendErrors.length === 0,
       nowTw: twTime,
       nowEt: etTime,
       windows: {
         isQuarterHour: ctx.isQuarterHour,
+        inAsiaSession: ctx.inAsiaSession,
         inLondonKillzone: ctx.inLondonKillzone,
         inNyKillzone: ctx.inNyKillzone,
         inNyOpeningRange: ctx.inNyOpeningRange,
+        activeKillzoneSession: ctx.activeKillzoneSession,
       },
       ran: {
         lq: ctx.isQuarterHour,
         divergence: ctx.isQuarterHour,
         alerts: ctx.isQuarterHour,
         killzone: ctx.inLondonKillzone || ctx.inNyKillzone,
+        sessionLiquidity: ctx.activeKillzoneSession !== 'Off-Hours',
       },
       counts: {
         lq: lqSignals.length,
         divergence: divAlerts.length,
         alerts: alertSignals.length,
         killzone: killzoneSignals.length,
+        sessionLiquidity: sessionLiquiditySignals.length,
       },
       sendErrors,
     });
