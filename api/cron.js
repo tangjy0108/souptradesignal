@@ -934,15 +934,27 @@ export default async function handler(req, res) {
     }
 
     if (ctx.activeKillzoneSession !== 'Off-Hours') {
+      const killzonePlanBySymbol = new Map(killzoneSignals.map(signal => [signal.sym, signal]));
       sessionLiquiditySignals = await runSessionLiquidityScan(now);
       for (const s of sessionLiquiditySignals) {
         const isBullishEvent = s.type === 'BREAKOUT_HIGH' || s.type === 'SWEEP_LOW';
         const emoji = isBullishEvent ? '🟢' : '🔴';
+        const linkedKillzonePlan = killzonePlanBySymbol.get(s.sym);
         const eventLabel =
           s.type === 'BREAKOUT_HIGH' ? '突破前高' :
           s.type === 'BREAKDOWN_LOW' ? '跌破前低' :
           s.type === 'SWEEP_HIGH' ? '掃前高後收回' :
           '掃前低後收回';
+        const tradePlanLines = linkedKillzonePlan
+          ? [
+              ``,
+              `📌 同輪 Killzone Setup：<b>${linkedKillzonePlan.setupType}</b>`,
+              `📍 Entry：<code>${fmt(linkedKillzonePlan.entry)}</code>`,
+              `🛡️ Stop：<code>${fmt(linkedKillzonePlan.stop)}</code>`,
+              `🎯 Target：<code>${fmt(linkedKillzonePlan.target)}</code>`,
+              `⚖️ R/R：<code>${linkedKillzonePlan.rr.toFixed(2)}</code>`,
+            ]
+          : [];
         const msg = [
           `${emoji} <b>${s.sym} Session Liquidity</b>`,
           `當前時段：<b>${s.currentSession}</b> | 目標：<b>${s.targetSession}</b>`,
@@ -953,6 +965,7 @@ export default async function handler(req, res) {
           `🎯 觸發位：<code>${fmt(s.level)}</code>`,
           `🪤 Extreme：<code>${fmt(s.extreme)}</code>`,
           `💰 現價：<code>${fmt(s.price)}</code>`,
+          ...tradePlanLines,
           ``,
           `🔁 同一個 ${s.targetSession} 區間的 ${s.side} 只提醒一次`,
           `⏰ TW ${twTime}`,
