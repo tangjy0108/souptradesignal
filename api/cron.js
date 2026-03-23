@@ -880,7 +880,11 @@ export default async function handler(req, res) {
 
       alertSignals = await runAlertScan();
       for (const a of alertSignals) {
-        const typeLabel = a.type === 'broke' ? '已突破' : '正在接近';
+        const typeLabel = a.type === 'near'
+          ? '正在接近'
+          : a.level !== undefined
+            ? (a.isRes ? '突破' : '跌破')
+            : (a.label.includes('多頭') ? '跌破' : '突破');
         let msg;
         if (a.level !== undefined) {
           msg = [
