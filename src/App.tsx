@@ -92,6 +92,151 @@ const STRATEGIES = [
   { id: 'harmonics',           name: '諧波形態'               },
 ];
 
+const SIGNAL_FEED_KEY = 'qv_signal_feed';
+
+type SignalFeedStatus =
+  | 'WAITING_CONFIRM'
+  | 'WAITING_RETEST'
+  | 'ACTIVE_TRADE'
+  | 'LIVE_SIGNAL'
+  | 'TP_HIT'
+  | 'SL_HIT';
+
+type SignalFeedItem = {
+  id: string;
+  fingerprint: string;
+  symbol: string;
+  strategyId: string;
+  strategyName: string;
+  direction: 'LONG' | 'SHORT' | 'NEUTRAL';
+  regime: string;
+  status: SignalFeedStatus;
+  session?: string;
+  setupType?: string;
+  bias?: string;
+  entryLow: number;
+  entryHigh: number;
+  stop: number;
+  target: number;
+  rr: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function readSignalFeed(): SignalFeedItem[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SIGNAL_FEED_KEY) || '[]');
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+function getResultLifecycleState(result: StrategyResult | null): SignalFeedStatus | null {
+  if (!result) return null;
+  const killzoneState = result.killzoneDetails?.state;
+  if (killzoneState && killzoneState !== 'IDLE') return killzoneState;
+  if (result.direction !== 'NEUTRAL') return 'LIVE_SIGNAL';
+  return null;
+}
+
+function getSignalStatusTone(status: SignalFeedStatus) {
+  if (status === 'TP_HIT') return 'bg-[#089981]/12 text-[#089981] border-[#089981]/25';
+  if (status === 'SL_HIT') return 'bg-[#F23645]/12 text-[#F23645] border-[#F23645]/25';
+  if (status === 'ACTIVE_TRADE' || status === 'LIVE_SIGNAL') return 'bg-[#2962FF]/12 text-[#7EA6FF] border-[#2962FF]/25';
+  if (status === 'WAITING_RETEST') return 'bg-[#FFC107]/12 text-[#FFC107] border-[#FFC107]/25';
+  return 'bg-[#A855F7]/12 text-[#C084FC] border-[#A855F7]/25';
+}
+
+function formatSignalStatus(status: SignalFeedStatus) {
+  return status.replaceAll('_', ' ');
+}
+
+function toSignalFeedItem(
+  result: StrategyResult,
+  strategyId: string,
+  strategyName: string,
+  symbol: string,
+): SignalFeedItem | null {
+  const lifecycleState = getResultLifecycleState(result);
+  if (!lifecycleState) return null;
+
+  const killzone = result.killzoneDetails;
+  const session = killzone?.currentSession && killzone.currentSession !== 'Off-Hours'
+    ? killzone.currentSession
+    : result.smcDetails?.currentSession;
+  const setupType = killzone?.setupType && killzone.setupType !== 'NONE' ? killzone.setupType : undefined;
+  const bias = killzone?.bias && killzone.bias !== 'NEUTRAL' ? killzone.bias : undefined;
+  const updatedAt = new Date().toISOString();
+  const precision = (value: number) => Number.isFinite(value) ? value.toFixed(6) : '0';
+  const fingerprint = [
+    strategyId,
+    symbol,
+    result.regime,
+    result.direction,
+    lifecycleState,
+    precision(result.entry_low),
+    precision(result.entry_high),
+    precision(result.stop),
+    precision(result.target),
+    precision(killzone?.sweepLevel || 0),
+    precision(killzone?.mssLevel || 0),
+  ].join('|');
+
+  return {
+    id: fingerprint,
+    fingerprint,
+    symbol,
+    strategyId,
+    strategyName,
+    direction: result.direction,
+    regime: result.regime,
+    status: lifecycleState,
+    session,
+    setupType,
+    bias,
+    entryLow: result.entry_low,
+    entryHigh: result.entry_high,
+    stop: result.stop,
+    target: result.target,
+    rr: result.rr,
+    createdAt: updatedAt,
+    updatedAt,
+  };
+}
+
+function upsertSignalFeed(prev: SignalFeedItem[], nextItem: SignalFeedItem) {
+  const idx = prev.findIndex(item => item.fingerprint === nextItem.fingerprint);
+  if (idx >= 0) {
+    const existing = prev[idx];
+    const merged: SignalFeedItem = {
+      ...existing,
+      ...nextItem,
+      createdAt: existing.createdAt,
+      updatedAt: nextItem.updatedAt,
+      status: existing.status === 'TP_HIT' || existing.status === 'SL_HIT' ? existing.status : nextItem.status,
+    };
+    return [merged, ...prev.filter((_, i) => i !== idx)].slice(0, 30);
+  }
+  return [nextItem, ...prev].slice(0, 30);
+}
+
+function resolveSignalOutcome(item: SignalFeedItem, price: number): SignalFeedStatus {
+  if (!Number.isFinite(price) || price <= 0) return item.status;
+  if (item.status !== 'LIVE_SIGNAL' && item.status !== 'ACTIVE_TRADE') return item.status;
+  if (item.stop <= 0 || item.target <= 0) return item.status;
+
+  if (item.direction === 'LONG') {
+    if (price >= item.target) return 'TP_HIT';
+    if (price <= item.stop) return 'SL_HIT';
+  }
+  if (item.direction === 'SHORT') {
+    if (price <= item.target) return 'TP_HIT';
+    if (price >= item.stop) return 'SL_HIT';
+  }
+  return item.status;
+}
+
 // Mobile tabs
 type MobileTab = 'chart' | 'signal' | 'alerts' | 'backtest';
 
@@ -156,6 +301,7 @@ export default function App() {
   const [showSR,   setShowSR]         = useState(false);
   const [showVolSpike, setShowVolSpike] = useState(false);
   const [strategyResult, setStrategyResult]       = useState<StrategyResult | null>(null);
+  const [signalFeed, setSignalFeed] = useState<SignalFeedItem[]>(() => readSignalFeed());
   const [isStrategyRunning, setIsStrategyRunning] = useState(false);
   const [harmonicPatterns, setHarmonicPatterns]   = useState<HarmonicPattern[]>([]);
   const [snrFvgResult, setSnrFvgResult]         = useState<SNRFVGResult | null>(null);
@@ -202,6 +348,7 @@ export default function App() {
   useEffect(() => { try { localStorage.setItem('qv_interval', interval); } catch {} }, [interval]);
   useEffect(() => { try { localStorage.setItem('favoriteSymbols', JSON.stringify(favorites)); } catch {} }, [favorites]);
   useEffect(() => { try { localStorage.setItem('customSymbols', JSON.stringify(customSymbols)); } catch {} }, [customSymbols]);
+  useEffect(() => { try { localStorage.setItem(SIGNAL_FEED_KEY, JSON.stringify(signalFeed)); } catch {} }, [signalFeed]);
 
   // Fetch all Binance USDT pairs
   useEffect(() => {
@@ -363,6 +510,35 @@ export default function App() {
   const fundingData   = useFundingRate(symbol, isFutures);
   const { alerts, addAlert, removeAlert, clearTriggered, notifPermission, requestPermission } = useAlerts(currentPrice, symbol);
   const { signals: mtfSignals, loading: mtfLoading } = useMultiTimeframe(symbol);
+
+  useEffect(() => {
+    if (!strategyResult || strategyId === 'harmonics' || strategyId === 'snr_fvg') return;
+    const strategyName = STRATEGIES.find(s => s.id === strategyId)?.name || strategyId;
+    const nextItem = toSignalFeedItem(strategyResult, strategyId, strategyName, symbol);
+    if (!nextItem) return;
+    setSignalFeed(prev => upsertSignalFeed(prev, nextItem));
+  }, [strategyResult, strategyId, symbol]);
+
+  useEffect(() => {
+    if (!symbol || currentPrice <= 0) return;
+    setSignalFeed(prev => {
+      let changed = false;
+      const next = prev.map(item => {
+        if (item.symbol !== symbol) return item;
+        const nextStatus = resolveSignalOutcome(item, currentPrice);
+        if (nextStatus === item.status) return item;
+        changed = true;
+        return {
+          ...item,
+          status: nextStatus,
+          updatedAt: new Date().toISOString(),
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, [symbol, currentPrice]);
+
+  const currentResultState = strategyResult ? getResultLifecycleState(strategyResult) : null;
 
   const handleRunStrategy = async () => {
     setIsStrategyRunning(true);
@@ -645,6 +821,99 @@ export default function App() {
     );
   });
 
+  const SignalFeedPanel = React.memo(({ items, onClear }: { items: SignalFeedItem[]; onClear: () => void }) => (
+    <div className="p-4 border-b border-[#2A2E39]">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-[10px] font-bold text-[#787B86] uppercase tracking-widest">Signal Feed</div>
+        {items.length > 0 && (
+          <button onClick={onClear} className="text-xs text-[#787B86] hover:text-[#D1D4DC]">清除</button>
+        )}
+      </div>
+      <div className="text-[10px] text-[#787B86] mb-3">
+        目前會在 app 內依照最新價格自動標記 TP / SL。
+      </div>
+      {items.length === 0 ? (
+        <div className="text-xs text-[#787B86] text-center py-3">尚無歷史訊號</div>
+      ) : (
+        <div className="space-y-2 max-h-72 overflow-y-auto custom-scrollbar">
+          {items.map(item => (
+            <button
+              key={item.id}
+              onClick={() => selectSymbol(item.symbol, true)}
+              className={`w-full text-left rounded-xl border p-3 transition-colors ${
+                item.symbol === symbol
+                  ? 'border-[#2962FF]/40 bg-[#2962FF]/8'
+                  : 'border-[#2A2E39] bg-[#1E222D] hover:bg-[#222734]'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-bold text-[#D1D4DC]">{item.symbol}</span>
+                    <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${getSignalStatusTone(item.status)}`}>
+                      {formatSignalStatus(item.status)}
+                    </span>
+                    {item.direction !== 'NEUTRAL' && (
+                      <span className={`text-[10px] font-bold ${item.direction === 'LONG' ? 'text-[#089981]' : 'text-[#F23645]'}`}>
+                        {item.direction}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 text-[11px] text-[#787B86]">{item.strategyName}</div>
+                </div>
+                <div className="text-[10px] text-[#787B86] text-right">
+                  {new Date(item.updatedAt).toLocaleString(undefined, {
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </div>
+              </div>
+
+              {(item.session || item.setupType || item.bias) && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {item.session && <span className="px-1.5 py-0.5 rounded bg-[#0F1117] text-[10px] text-[#9CA3AF]">{item.session}</span>}
+                  {item.setupType && <span className="px-1.5 py-0.5 rounded bg-[#0F1117] text-[10px] text-[#D1D4DC]">{item.setupType}</span>}
+                  {item.bias && (
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                      item.bias === 'BULLISH' ? 'bg-[#089981]/10 text-[#089981]' : 'bg-[#F23645]/10 text-[#F23645]'
+                    }`}>
+                      {item.bias}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                <div className="flex justify-between gap-2">
+                  <span className="text-[#787B86]">Entry</span>
+                  <span className="text-white font-mono">
+                    {item.entryLow > 0 && item.entryHigh > 0
+                      ? <><PriceText price={item.entryLow} /> - <PriceText price={item.entryHigh} /></>
+                      : '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-[#787B86]">R/R</span>
+                  <span className="text-[#D1D4DC] font-mono">{item.rr > 0 ? item.rr.toFixed(2) : '—'}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-[#787B86]">Stop</span>
+                  <span className="text-[#F23645] font-mono">{item.stop > 0 ? <PriceText price={item.stop} /> : '—'}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-[#787B86]">Target</span>
+                  <span className="text-[#089981] font-mono">{item.target > 0 ? <PriceText price={item.target} /> : '—'}</span>
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  ));
+
   // ── 掃描器新增幣種 mini input ──
   const ScannerAddSymbol = React.memo(({ onAdd }: { onAdd: (s: string) => void }) => {
     const [val, setVal] = React.useState('');
@@ -854,6 +1123,40 @@ export default function App() {
               <span className="text-sm text-[#787B86] shrink-0">Regime</span>
               <span className="text-sm font-medium text-[#D1D4DC] truncate text-right">{strategyResult.regime}</span>
             </div>
+            {currentResultState && (
+              <div className="rounded-lg border border-[#2A2E39] bg-[#1E222D] p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm text-[#787B86]">Signal State</span>
+                  <span className={`px-2 py-1 rounded-full border text-[10px] font-bold ${getSignalStatusTone(currentResultState)}`}>
+                    {formatSignalStatus(currentResultState)}
+                  </span>
+                </div>
+                {(strategyResult.killzoneDetails || strategyResult.smcDetails) && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {strategyResult.killzoneDetails?.currentSession && strategyResult.killzoneDetails.currentSession !== 'Off-Hours' && (
+                      <span className="px-1.5 py-0.5 rounded bg-[#0F1117] text-[10px] text-[#9CA3AF]">{strategyResult.killzoneDetails.currentSession}</span>
+                    )}
+                    {strategyResult.killzoneDetails?.setupType && strategyResult.killzoneDetails.setupType !== 'NONE' && (
+                      <span className="px-1.5 py-0.5 rounded bg-[#0F1117] text-[10px] text-[#D1D4DC]">{strategyResult.killzoneDetails.setupType}</span>
+                    )}
+                    {strategyResult.killzoneDetails?.bias && strategyResult.killzoneDetails.bias !== 'NEUTRAL' && (
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                        strategyResult.killzoneDetails.bias === 'BULLISH'
+                          ? 'bg-[#089981]/10 text-[#089981]'
+                          : 'bg-[#F23645]/10 text-[#F23645]'
+                      }`}>
+                        {strategyResult.killzoneDetails.bias}
+                      </span>
+                    )}
+                    {strategyResult.smcDetails?.targetSession && (
+                      <span className="px-1.5 py-0.5 rounded bg-[#0F1117] text-[10px] text-[#D1D4DC]">
+                        {strategyResult.smcDetails.currentSession}{' -> '}{strategyResult.smcDetails.targetSession}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="h-px bg-[#2A2E39]" />
             <div className="space-y-2">
               {[
@@ -896,6 +1199,7 @@ export default function App() {
           </div>
         ) : null}
       </div>
+      <SignalFeedPanel items={signalFeed} onClear={() => setSignalFeed([])} />
       <MTFPanel />
 
       {/* ── 諧波掃描器 ── */}
@@ -1523,6 +1827,14 @@ export default function App() {
                       <div className={`w-2 h-2 rounded-full ${strategyResult.direction === 'LONG' ? 'bg-[#089981]' : 'bg-[#F23645]'}`} />
                       <span className={`text-sm font-bold ${strategyResult.direction === 'LONG' ? 'text-[#089981]' : 'text-[#F23645]'}`}>{strategyResult.direction}</span>
                     </div>
+                    {currentResultState && (
+                      <>
+                        <span className="text-[#2A2E39]">|</span>
+                        <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${getSignalStatusTone(currentResultState)}`}>
+                          {formatSignalStatus(currentResultState)}
+                        </span>
+                      </>
+                    )}
                     <span className="text-[#2A2E39]">|</span>
                     <span className="text-xs text-[#787B86]">R/R <span className="text-[#D1D4DC] font-mono">{strategyResult.rr.toFixed(2)}</span></span>
                     <span className="text-[#2A2E39]">|</span>
