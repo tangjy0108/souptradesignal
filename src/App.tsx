@@ -87,6 +87,7 @@ const STRATEGIES = [
   { id: 'ms_ob',               name: 'Market Structure + OB'  },
   { id: 'structural_reversal', name: 'Structural Reversal (PRZ)' },
   { id: 'smc_session',         name: 'SMC Rolling Session'    },
+  { id: 'ict_killzone_opt3',   name: 'ICT Killzone Opt3'      },
   { id: 'snr_fvg',             name: 'SNR + FVG 獵取'         },
   { id: 'harmonics',           name: '諧波形態'               },
 ];
@@ -341,7 +342,12 @@ export default function App() {
     let max = Math.max(...chartData.map(d => d.high));
     if (strategyResult) {
       const vals = [strategyResult.target, strategyResult.stop, strategyResult.entry_low, strategyResult.entry_high,
-        strategyResult.smcDetails?.targetHigh, strategyResult.smcDetails?.targetLow].filter(v => typeof v === 'number' && v > 0) as number[];
+        strategyResult.smcDetails?.targetHigh, strategyResult.smcDetails?.targetLow,
+        strategyResult.killzoneDetails?.asiaHigh, strategyResult.killzoneDetails?.asiaLow,
+        strategyResult.killzoneDetails?.orHigh, strategyResult.killzoneDetails?.orLow,
+        strategyResult.killzoneDetails?.mssLevel, strategyResult.killzoneDetails?.sweepLevel,
+        strategyResult.killzoneDetails?.sweepExtreme, strategyResult.killzoneDetails?.fvgLow,
+        strategyResult.killzoneDetails?.fvgHigh].filter(v => typeof v === 'number' && v > 0) as number[];
       if (vals.length) { min = Math.min(min, ...vals); max = Math.max(max, ...vals); }
     }
     if (showSR) {
@@ -840,7 +846,7 @@ export default function App() {
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm text-[#787B86]">Direction</span>
-              <span className={`px-2 py-1 rounded text-xs font-bold ${strategyResult.direction === 'LONG' ? 'bg-[#089981]/10 text-[#089981]' : 'bg-[#F23645]/10 text-[#F23645]'}`}>
+              <span className={`px-2 py-1 rounded text-xs font-bold ${strategyResult.direction === 'LONG' ? 'bg-[#089981]/10 text-[#089981]' : strategyResult.direction === 'SHORT' ? 'bg-[#F23645]/10 text-[#F23645]' : 'bg-[#787B86]/10 text-[#787B86]'}`}>
                 {strategyResult.direction}
               </span>
             </div>
@@ -1273,6 +1279,11 @@ export default function App() {
                         {...({ fill: strategyResult.smcDetails.currentSession === 'Asia' ? '#2196F3' : strategyResult.smcDetails.currentSession === 'London' ? '#FFC107' : '#F44336', fillOpacity: 0.05, stroke: 'none' } as any)}
                       />
                     )}
+                    {strategyResult?.killzoneDetails && strategyResult.killzoneDetails.currentSession !== 'Off-Hours' && (
+                      <ReferenceArea
+                        {...({ fill: strategyResult.killzoneDetails.currentSession === 'Asia' ? '#2196F3' : strategyResult.killzoneDetails.currentSession === 'London' ? '#2962FF' : '#F44336', fillOpacity: 0.04, stroke: 'none' } as any)}
+                      />
+                    )}
                     {strategyResult && strategyResult.entry_low > 0 && strategyResult.entry_high > 0 && (
                       <ReferenceArea y1={strategyResult.entry_low} y2={strategyResult.entry_high}
                         {...({ fill: strategyResult.direction === 'LONG' ? '#089981' : '#F23645', fillOpacity: 0.15, stroke: 'none' } as any)} />
@@ -1296,6 +1307,34 @@ export default function App() {
                     {strategyResult?.smcDetails?.obLow > 0 && strategyResult?.smcDetails?.obHigh > 0 && (
                       <ReferenceArea y1={strategyResult.smcDetails.obLow} y2={strategyResult.smcDetails.obHigh}
                         {...({ fill: strategyResult.smcDetails.obType === 'BULLISH' ? '#089981' : '#F23645', fillOpacity: 0.3, stroke: strategyResult.smcDetails.obType === 'BULLISH' ? '#089981' : '#F23645', strokeWidth: 1 } as any)} />
+                    )}
+                    {strategyResult?.killzoneDetails?.asiaHigh > 0 && (
+                      <ReferenceLine y={strategyResult.killzoneDetails.asiaHigh} stroke="#14B8A6" strokeDasharray="4 4"
+                        label={{ position: 'insideTopLeft', value: 'Asia High', fill: '#14B8A6', fontSize: 11, fontWeight: 600 }} />
+                    )}
+                    {strategyResult?.killzoneDetails?.asiaLow > 0 && (
+                      <ReferenceLine y={strategyResult.killzoneDetails.asiaLow} stroke="#14B8A6" strokeDasharray="4 4"
+                        label={{ position: 'insideBottomLeft', value: 'Asia Low', fill: '#14B8A6', fontSize: 11, fontWeight: 600 }} />
+                    )}
+                    {strategyResult?.killzoneDetails?.orHigh > 0 && (
+                      <ReferenceLine y={strategyResult.killzoneDetails.orHigh} stroke="#FF9800" strokeDasharray="3 3"
+                        label={{ position: 'insideTopRight', value: 'OR High', fill: '#FF9800', fontSize: 11, fontWeight: 600 }} />
+                    )}
+                    {strategyResult?.killzoneDetails?.orLow > 0 && (
+                      <ReferenceLine y={strategyResult.killzoneDetails.orLow} stroke="#FF9800" strokeDasharray="3 3"
+                        label={{ position: 'insideBottomRight', value: 'OR Low', fill: '#FF9800', fontSize: 11, fontWeight: 600 }} />
+                    )}
+                    {strategyResult?.killzoneDetails?.mssLevel > 0 && (
+                      <ReferenceLine y={strategyResult.killzoneDetails.mssLevel} stroke="#2962FF" strokeDasharray="6 3" strokeWidth={1.5}
+                        label={{ position: strategyResult.direction === 'LONG' ? 'insideTopLeft' : 'insideBottomLeft', value: 'MSS', fill: '#2962FF', fontSize: 10, fontWeight: 600 }} />
+                    )}
+                    {strategyResult?.killzoneDetails?.sweepLevel > 0 && (
+                      <ReferenceLine y={strategyResult.killzoneDetails.sweepLevel} stroke="#A855F7" strokeDasharray="2 4" strokeWidth={1.2}
+                        label={{ position: 'insideTopLeft', value: 'Sweep Level', fill: '#A855F7', fontSize: 10 }} />
+                    )}
+                    {strategyResult?.killzoneDetails?.fvgLow > 0 && strategyResult?.killzoneDetails?.fvgHigh > 0 && (
+                      <ReferenceArea y1={strategyResult.killzoneDetails.fvgLow} y2={strategyResult.killzoneDetails.fvgHigh}
+                        {...({ fill: strategyResult.direction === 'LONG' ? '#2962FF' : '#A855F7', fillOpacity: 0.16, stroke: strategyResult.direction === 'LONG' ? '#2962FF' : '#A855F7', strokeWidth: 1, strokeDasharray: '3 3' } as any)} />
                     )}
 
                     {/* BB */}
@@ -1417,7 +1456,7 @@ export default function App() {
                   {STRATEGIES.map(s => (
                     <button key={s.id} onClick={() => setStrategyId(s.id)}
                       className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ${strategyId === s.id ? 'bg-[#2962FF] text-white' : 'bg-[#1E222D] text-[#787B86] border border-[#2A2E39]'}`}>
-                      {s.id === 'ms_ob' ? 'MS+OB' : s.id === 'structural_reversal' ? 'PRZ' : s.id === 'smc_session' ? 'SMC' : s.id === 'snr_fvg' ? 'SNR+FVG' : '諧波'}
+                      {s.id === 'ms_ob' ? 'MS+OB' : s.id === 'structural_reversal' ? 'PRZ' : s.id === 'smc_session' ? 'SMC' : s.id === 'ict_killzone_opt3' ? 'KZ' : s.id === 'snr_fvg' ? 'SNR+FVG' : '諧波'}
                     </button>
                   ))}
                 </div>

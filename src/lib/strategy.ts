@@ -1,3 +1,4 @@
+import type { Kline } from '../hooks/useKlines';
 import { calculateEMA, calculateATR, calculateADX, calculateRSI } from './indicators';
 
 export type StrategyResult = {
@@ -25,6 +26,21 @@ export type StrategyResult = {
     sweepState: 'SWEEP_HIGH' | 'SWEEP_LOW' | 'NONE';
     sweepHigh?: number;
     sweepLow?: number;
+  };
+  killzoneDetails?: {
+    currentSession: 'Asia' | 'London' | 'New York' | 'Off-Hours';
+    setupType: 'LONDON_REVERSAL' | 'NY_REVERSAL' | 'NY_CONTINUATION' | 'NONE';
+    bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    asiaHigh: number;
+    asiaLow: number;
+    orHigh: number;
+    orLow: number;
+    sweepSide: 'ASIA_HIGH' | 'ASIA_LOW' | 'OR_HIGH' | 'OR_LOW' | 'NONE';
+    sweepLevel: number;
+    sweepExtreme: number;
+    mssLevel: number;
+    fvgLow: number;
+    fvgHigh: number;
   };
 } | null;
 
@@ -90,6 +106,63 @@ async function fetchKlinesWithFallback(symbol: string, interval: string, limit: 
   } catch (e) {
     throw lastError || new Error('All endpoints failed');
   }
+}
+
+type KillzoneSession = 'Asia' | 'London' | 'New York' | 'Off-Hours';
+
+function getTimePartsInZone(time: number, timeZone: string = 'America/New_York') {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(new Date(time));
+
+  const map = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  const weekdayMap: Record<string, number> = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+  };
+
+  const hour = Number(map.hour || 0);
+  const minute = Number(map.minute || 0);
+  const weekday = weekdayMap[map.weekday || 'Sun'] ?? 0;
+
+  return {
+    hour,
+    minute,
+    minuteOfDay: hour * 60 + minute,
+    weekday,
+  };
+}
+
+function inSession(minuteOfDay: number, startMinute: number, endMinute: number) {
+  return startMinute < endMinute
+    ? minuteOfDay >= startMinute && minuteOfDay < endMinute
+    : minuteOfDay >= startMinute || minuteOfDay < endMinute;
+}
+
+function findLatestIndexAtOrBefore(klines: Kline[], time: number) {
+  for (let i = klines.length - 1; i >= 0; i--) {
+    if (klines[i].time <= time) return i;
+  }
+  return -1;
+}
+
+function getCurrentKillzoneSession(time: number): KillzoneSession {
+  const et = getTimePartsInZone(time);
+  const tradeDay = et.weekday >= 1 && et.weekday <= 5;
+
+  if (inSession(et.minuteOfDay, 20 * 60, 0)) return 'Asia';
+  if (tradeDay && inSession(et.minuteOfDay, 2 * 60, 5 * 60)) return 'London';
+  if (tradeDay && inSession(et.minuteOfDay, 8 * 60 + 30, 11 * 60)) return 'New York';
+  return 'Off-Hours';
 }
 
 // --- Helper functions for Structural Reversal ---
@@ -829,12 +902,369 @@ async function runSMCStrategy(symbol: string): Promise<StrategyResult> {
   };
 }
 
+async function runIctKillzoneOpt3Strategy(symbol: string): Promise<StrategyResult> {
+  const decimals = getDecimals(symbol);
+  const logs: string[] = [`[ICT Killzone Opt3]`, `📍 分析幣種: ${symbol}`];
+
+  const [klines5m, klines1h, klines1d] = await Promise.all([
+    fetchKlinesWithFallback(symbol, '5m', 500),
+    fetchKlinesWithFallback(symbol, '1h', 300),
+    fetchKlinesWithFallback(symbol, '1d', 10),
+  ]);
+
+  if (klines5m.length < 80 || klines1h.length < 60 || klines1d.length < 2) {
+    return {
+      symbol,
+      time: new Date().toISOString(),
+      regime: 'NO_DATA',
+      price: 0,
+      direction: 'NEUTRAL',
+      entry_low: 0,
+      entry_high: 0,
+      stop: 0,
+      target: 0,
+      rr: 0,
+      logs: [...logs, '⚠️ 資料不足，無法計算 Killzone 模型'],
+    };
+  }
+
+  const last = klines5m.length - 1;
+  const current = klines5m[last];
+  const prev = klines5m[last - 1];
+  const prev2 = klines5m[last - 2];
+  const currentSession = getCurrentKillzoneSession(current.time);
+  const et = getTimePartsInZone(current.time);
+  const tradeDay = et.weekday >= 1 && et.weekday <= 5;
+  const inLondon = tradeDay && inSession(et.minuteOfDay, 2 * 60, 5 * 60);
+  const inNyWindow = tradeDay && inSession(et.minuteOfDay, 8 * 60 + 30, 11 * 60);
+  const afterOpeningRange = inNyWindow && et.minuteOfDay >= 10 * 60;
+
+  const closes5m = klines5m.map(k => k.close);
+  const highs5m = klines5m.map(k => k.high);
+  const lows5m = klines5m.map(k => k.low);
+  const atrSeries = calculateATR(highs5m, lows5m, closes5m, 14);
+  const atr = atrSeries[last] || 0;
+  const bodySize = Math.abs(current.close - current.open);
+  const sweepBuffer = atr * 0.10;
+  const stopBuffer = atr * 0.20;
+
+  const emaFastSeries = calculateEMA(klines1h.map(k => k.close), 20);
+  const emaSlowSeries = calculateEMA(klines1h.map(k => k.close), 50);
+  const h1Idx = findLatestIndexAtOrBefore(klines1h, current.time);
+  const d1Idx = findLatestIndexAtOrBefore(klines1d, current.time);
+  const h1Fast = h1Idx >= 0 ? emaFastSeries[h1Idx] : null;
+  const h1Slow = h1Idx >= 0 ? emaSlowSeries[h1Idx] : null;
+  const dailyOpen = d1Idx >= 0 ? klines1d[d1Idx].open : current.open;
+
+  const bullBias = !!(h1Fast && h1Slow && h1Fast > h1Slow);
+  const bearBias = !!(h1Fast && h1Slow && h1Fast < h1Slow);
+  const biasLabel = bullBias ? 'BULLISH' : bearBias ? 'BEARISH' : 'NEUTRAL';
+
+  let asiaHigh = 0;
+  let asiaLow = 0;
+  let orHigh = 0;
+  let orLow = 0;
+  let prevInAsia = false;
+  let prevNyWindow = false;
+
+  for (const bar of klines5m) {
+    const barEt = getTimePartsInZone(bar.time);
+    const barTradeDay = barEt.weekday >= 1 && barEt.weekday <= 5;
+    const barInAsia = inSession(barEt.minuteOfDay, 20 * 60, 0);
+    const barInNyWindow = barTradeDay && inSession(barEt.minuteOfDay, 8 * 60 + 30, 11 * 60);
+    const barInOpeningRange = barTradeDay && inSession(barEt.minuteOfDay, 9 * 60 + 30, 10 * 60);
+
+    if (barInAsia && !prevInAsia) {
+      asiaHigh = bar.high;
+      asiaLow = bar.low;
+    } else if (barInAsia) {
+      asiaHigh = Math.max(asiaHigh, bar.high);
+      asiaLow = Math.min(asiaLow, bar.low);
+    }
+
+    if (barInNyWindow && !prevNyWindow) {
+      orHigh = 0;
+      orLow = 0;
+    }
+    if (barInOpeningRange) {
+      orHigh = orHigh === 0 ? bar.high : Math.max(orHigh, bar.high);
+      orLow = orLow === 0 ? bar.low : Math.min(orLow, bar.low);
+    }
+
+    prevInAsia = barInAsia;
+    prevNyWindow = barInNyWindow;
+  }
+
+  const bullMssLevel = Math.max(...highs5m.slice(Math.max(0, last - 3), last));
+  const bearMssLevel = Math.min(...lows5m.slice(Math.max(0, last - 3), last));
+  const bullMss = current.close > bullMssLevel;
+  const bearMss = current.close < bearMssLevel;
+  const bullDisplacement = current.close > current.open && bodySize >= atr * 0.5;
+  const bearDisplacement = current.close < current.open && bodySize >= atr * 0.5;
+  const bullFvg = current.low > prev2.high;
+  const bearFvg = current.high < prev2.low;
+  const bullConfirm = bullDisplacement && bullMss;
+  const bearConfirm = bearDisplacement && bearMss;
+
+  const recent = klines5m.slice(Math.max(0, last - 10), last + 1);
+  const londonBullSweeps = inLondon && asiaLow > 0
+    ? recent.filter(bar => bar.low < asiaLow - sweepBuffer)
+    : [];
+  const londonBearSweeps = inLondon && asiaHigh > 0
+    ? recent.filter(bar => bar.high > asiaHigh + sweepBuffer)
+    : [];
+  const nyBullReversalSweeps = afterOpeningRange && orLow > 0
+    ? recent.filter(bar => bar.low < orLow - sweepBuffer)
+    : [];
+  const nyBearReversalSweeps = afterOpeningRange && orHigh > 0
+    ? recent.filter(bar => bar.high > orHigh + sweepBuffer)
+    : [];
+
+  let direction: 'LONG' | 'SHORT' | 'NEUTRAL' = 'NEUTRAL';
+  let entry_low = 0;
+  let entry_high = 0;
+  let stop = 0;
+  let target = 0;
+  let rr = 0;
+  let regime = 'WAITING';
+  let setupType: 'LONDON_REVERSAL' | 'NY_REVERSAL' | 'NY_CONTINUATION' | 'NONE' = 'NONE';
+  let sweepSide: 'ASIA_HIGH' | 'ASIA_LOW' | 'OR_HIGH' | 'OR_LOW' | 'NONE' = 'NONE';
+  let sweepLevel = 0;
+  let sweepExtreme = 0;
+  let mssLevel = 0;
+  let fvgLow = 0;
+  let fvgHigh = 0;
+
+  const setTrade = (
+    side: 'LONG' | 'SHORT',
+    nextSetupType: 'LONDON_REVERSAL' | 'NY_REVERSAL' | 'NY_CONTINUATION',
+    nextSweepSide: 'ASIA_HIGH' | 'ASIA_LOW' | 'OR_HIGH' | 'OR_LOW',
+    nextSweepLevel: number,
+    nextSweepExtreme: number,
+    nextMssLevel: number,
+    nextEntry: number,
+    nextStop: number,
+    nextTarget: number,
+    nextFvgLow: number,
+    nextFvgHigh: number,
+    summary: string[],
+  ) => {
+    direction = side;
+    setupType = nextSetupType;
+    sweepSide = nextSweepSide;
+    sweepLevel = nextSweepLevel;
+    sweepExtreme = nextSweepExtreme;
+    mssLevel = nextMssLevel;
+    entry_low = nextEntry;
+    entry_high = nextEntry;
+    stop = nextStop;
+    target = nextTarget;
+    fvgLow = nextFvgLow;
+    fvgHigh = nextFvgHigh;
+    rr = Math.abs(nextTarget - nextEntry) / Math.max(Math.abs(nextEntry - nextStop), 0.0000001);
+    regime = `${nextSetupType}_${side}`;
+    logs.push(...summary);
+  };
+
+  logs.push(`🕒 當前時段: ${currentSession}`);
+  logs.push(`📈 Bias: ${biasLabel} | H1 EMA20 ${h1Fast?.toFixed(decimals) ?? 'n/a'} / EMA50 ${h1Slow?.toFixed(decimals) ?? 'n/a'}`);
+  logs.push(`🌞 Daily Open: ${dailyOpen.toFixed(decimals)}`);
+  logs.push(`🌏 Asia Range: ${asiaLow.toFixed(decimals)} - ${asiaHigh.toFixed(decimals)}`);
+  if (orHigh > 0 && orLow > 0) {
+    logs.push(`🗽 NY Opening Range: ${orLow.toFixed(decimals)} - ${orHigh.toFixed(decimals)}`);
+  }
+  logs.push(`⚙️ Confirm: Disp ${bullDisplacement || bearDisplacement ? 'YES' : 'NO'} | Bull MSS ${bullMss ? 'YES' : 'NO'} | Bear MSS ${bearMss ? 'YES' : 'NO'}`);
+
+  if (inLondon && bullBias && bullConfirm && londonBullSweeps.length > 0) {
+    const extreme = Math.min(...londonBullSweeps.map(bar => bar.low));
+    const entry = current.close;
+    const stopPrice = extreme - stopBuffer;
+    const targetPrice = entry + (entry - stopPrice) * 2.0;
+    setTrade(
+      'LONG',
+      'LONDON_REVERSAL',
+      'ASIA_LOW',
+      asiaLow,
+      extreme,
+      bullMssLevel,
+      entry,
+      stopPrice,
+      targetPrice,
+      bullFvg ? prev2.high : 0,
+      bullFvg ? current.low : 0,
+      [
+        `✅ London reversal long 觸發`,
+        `- 掃掉 Asia Low 後反轉，MSS 位 ${bullMssLevel.toFixed(decimals)}`,
+        `- 入場 ${entry.toFixed(decimals)} | Stop ${stopPrice.toFixed(decimals)} | Target ${targetPrice.toFixed(decimals)}`,
+      ],
+    );
+  } else if (inLondon && bearBias && bearConfirm && londonBearSweeps.length > 0) {
+    const extreme = Math.max(...londonBearSweeps.map(bar => bar.high));
+    const entry = current.close;
+    const stopPrice = extreme + stopBuffer;
+    const targetPrice = entry - (stopPrice - entry) * 2.0;
+    setTrade(
+      'SHORT',
+      'LONDON_REVERSAL',
+      'ASIA_HIGH',
+      asiaHigh,
+      extreme,
+      bearMssLevel,
+      entry,
+      stopPrice,
+      targetPrice,
+      bearFvg ? current.high : 0,
+      bearFvg ? prev2.low : 0,
+      [
+        `✅ London reversal short 觸發`,
+        `- 掃掉 Asia High 後反轉，MSS 位 ${bearMssLevel.toFixed(decimals)}`,
+        `- 入場 ${entry.toFixed(decimals)} | Stop ${stopPrice.toFixed(decimals)} | Target ${targetPrice.toFixed(decimals)}`,
+      ],
+    );
+  } else if (afterOpeningRange && bullBias && bullConfirm && bullFvg && nyBullReversalSweeps.length > 0 && current.close > orLow) {
+    const extreme = Math.min(...nyBullReversalSweeps.map(bar => bar.low));
+    const entry = current.close;
+    const stopPrice = extreme - stopBuffer;
+    const targetPrice = entry + (entry - stopPrice) * 2.0;
+    setTrade(
+      'LONG',
+      'NY_REVERSAL',
+      'OR_LOW',
+      orLow,
+      extreme,
+      bullMssLevel,
+      entry,
+      stopPrice,
+      targetPrice,
+      prev2.high,
+      current.low,
+      [
+        `✅ NY reversal long 觸發`,
+        `- 掃掉 OR Low 後收回，且 NY long 保留 FVG 過濾`,
+        `- 入場 ${entry.toFixed(decimals)} | Stop ${stopPrice.toFixed(decimals)} | Target ${targetPrice.toFixed(decimals)}`,
+      ],
+    );
+  } else if (afterOpeningRange && bearBias && bearConfirm && nyBearReversalSweeps.length > 0 && current.close < orHigh) {
+    const extreme = Math.max(...nyBearReversalSweeps.map(bar => bar.high));
+    const entry = current.close;
+    const stopPrice = extreme + stopBuffer;
+    const targetPrice = entry - (stopPrice - entry) * 2.0;
+    setTrade(
+      'SHORT',
+      'NY_REVERSAL',
+      'OR_HIGH',
+      orHigh,
+      extreme,
+      bearMssLevel,
+      entry,
+      stopPrice,
+      targetPrice,
+      bearFvg ? current.high : 0,
+      bearFvg ? prev2.low : 0,
+      [
+        `✅ NY reversal short 觸發`,
+        `- 掃掉 OR High 後反轉，等待回補失衡`,
+        `- 入場 ${entry.toFixed(decimals)} | Stop ${stopPrice.toFixed(decimals)} | Target ${targetPrice.toFixed(decimals)}`,
+      ],
+    );
+  } else if (afterOpeningRange && bullBias && bullConfirm && bullFvg && orHigh > 0 && current.close > orHigh && prev.close <= orHigh) {
+    const entry = current.close;
+    const stopPrice = Math.min(orLow || current.low, prev.low, prev2.low) - stopBuffer;
+    const targetPrice = entry + (entry - stopPrice) * 2.0;
+    setTrade(
+      'LONG',
+      'NY_CONTINUATION',
+      'OR_HIGH',
+      orHigh,
+      current.high,
+      bullMssLevel,
+      entry,
+      stopPrice,
+      targetPrice,
+      prev2.high,
+      current.low,
+      [
+        `✅ NY continuation long 觸發`,
+        `- 突破 OR High 並伴隨 displacement + MSS + FVG`,
+        `- 入場 ${entry.toFixed(decimals)} | Stop ${stopPrice.toFixed(decimals)} | Target ${targetPrice.toFixed(decimals)}`,
+      ],
+    );
+  } else if (afterOpeningRange && bearBias && bearConfirm && orLow > 0 && current.close < orLow && prev.close >= orLow) {
+    const entry = current.close;
+    const stopPrice = Math.max(orHigh || current.high, prev.high, prev2.high) + stopBuffer;
+    const targetPrice = entry - (stopPrice - entry) * 2.0;
+    setTrade(
+      'SHORT',
+      'NY_CONTINUATION',
+      'OR_LOW',
+      orLow,
+      current.low,
+      bearMssLevel,
+      entry,
+      stopPrice,
+      targetPrice,
+      bearFvg ? current.high : 0,
+      bearFvg ? prev2.low : 0,
+      [
+        `✅ NY continuation short 觸發`,
+        `- 跌破 OR Low 並延續`,
+        `- 入場 ${entry.toFixed(decimals)} | Stop ${stopPrice.toFixed(decimals)} | Target ${targetPrice.toFixed(decimals)}`,
+      ],
+    );
+  } else {
+    if (inLondon) {
+      logs.push(`⏳ 倫敦窗內，但還沒有完整的 sweep + displacement + MSS 組合`);
+    } else if (afterOpeningRange) {
+      logs.push(`⏳ NY 窗內，但 OR 劇本尚未完整確認`);
+    } else if (inNyWindow) {
+      logs.push(`⏳ 還在 NY Opening Range 建立中，先等 09:30-10:00 ET 完成`);
+    } else {
+      logs.push(`💤 目前不在 London / NY AM 執行窗，先看 levels 不急著下結論`);
+    }
+  }
+
+  if (direction !== 'NEUTRAL') {
+    logs.push(`⚖️ R/R: ${rr.toFixed(2)}`);
+  }
+
+  return {
+    symbol,
+    time: new Date(current.time).toISOString(),
+    regime,
+    price: current.close,
+    direction,
+    entry_low,
+    entry_high,
+    stop,
+    target,
+    rr,
+    logs,
+    killzoneDetails: {
+      currentSession,
+      setupType,
+      bias: biasLabel,
+      asiaHigh,
+      asiaLow,
+      orHigh,
+      orLow,
+      sweepSide,
+      sweepLevel,
+      sweepExtreme,
+      mssLevel,
+      fvgLow,
+      fvgHigh,
+    },
+  };
+}
+
 export async function runStrategy(symbol: string, strategyId: string = 'ms_ob'): Promise<StrategyResult> {
   try {
     if (strategyId === 'structural_reversal') {
       return await runStructuralReversalStrategy(symbol);
     } else if (strategyId === 'smc_session') {
       return await runSMCStrategy(symbol);
+    } else if (strategyId === 'ict_killzone_opt3') {
+      return await runIctKillzoneOpt3Strategy(symbol);
     } else {
       return await runMarketStructureOBStrategy(symbol);
     }
