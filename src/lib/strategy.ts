@@ -116,6 +116,9 @@ function getTimePartsInZone(time: number, timeZone: string = 'America/New_York')
     timeZone,
     hour12: false,
     weekday: 'short',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
   }).formatToParts(new Date(time));
@@ -140,6 +143,10 @@ function getTimePartsInZone(time: number, timeZone: string = 'America/New_York')
     minute,
     minuteOfDay: hour * 60 + minute,
     weekday,
+    year: Number(map.year || 0),
+    month: Number(map.month || 0),
+    day: Number(map.day || 0),
+    dateKey: `${map.year || '0000'}-${map.month || '00'}-${map.day || '00'}`,
   };
 }
 
@@ -379,7 +386,7 @@ async function runMarketStructureOBStrategy(symbol: string): Promise<StrategyRes
   logs.push(`🔍 尋找 ${isBullish ? '做多 (Bullish)' : '做空 (Bearish)'} Order Block...`);
 
   // 2. 找最近突破點（4H）
-  const breakoutIdx = klines4h.length - 10; // 往前10根找OB
+  const breakoutIdx = Math.max(1, klines4h.length - 2); // 以最近完成K線為起點回找最近有效 OB
   const ob = findOrderBlock(klines4h, obType, breakoutIdx);
 
   if (!ob) {
@@ -513,7 +520,7 @@ async function runStructuralReversalStrategy(symbol: string): Promise<StrategyRe
       }
       return {
         symbol, time: new Date().toISOString(), regime: "RANGE_WAITING", price,
-        direction: 'LONG', entry_low: 0, entry_high: 0, stop: 0, target: 0, rr: 0, logs
+        direction: 'NEUTRAL', entry_low: 0, entry_high: 0, stop: 0, target: 0, rr: 0, logs
       };
     } else {
       logs.push(`✅ 找到 1H 局部趨勢: ${trend1hResult.trend}`);
@@ -530,7 +537,7 @@ async function runStructuralReversalStrategy(symbol: string): Promise<StrategyRe
     logs.push(`❌ Could not find impulse leg`);
     return {
       symbol, time: new Date().toISOString(), regime: "NO_IMPULSE", price: activeKlines[activeKlines.length-1].close,
-      direction: 'LONG', entry_low: 0, entry_high: 0, stop: 0, target: 0, rr: 0, logs
+      direction: 'NEUTRAL', entry_low: 0, entry_high: 0, stop: 0, target: 0, rr: 0, logs
     };
   }
 
@@ -609,47 +616,103 @@ async function runStructuralReversalStrategy(symbol: string): Promise<StrategyRe
   };
 }
 
-function getSessionInfo(date: Date) {
-  const h = date.getUTCHours();
-  if (h >= 13 && h < 22) return { current: 'New York', target: 'London' };
-  if (h >= 7 && h < 13) return { current: 'London', target: 'Asia' };
-  if (h >= 0 && h < 7) return { current: 'Asia', target: 'New York' };
-  return { current: 'Off-Hours', target: 'New York' }; 
+type RollingSession = 'Asia' | 'London' | 'New York' | 'Off-Hours';
+
+function getRollingSessionMeta(time: number): { session: RollingSession; sessionKey: string | null } {
+  const et = getTimePartsInZone(time);
+  const isWeekday = et.weekday >= 1 && et.weekday <= 5;
+
+  if (inSession(et.minuteOfDay, 20 * 60, 2 * 60)) {
+    const sessionDateKey = et.minuteOfDay < 2 * 60
+      ? getTimePartsInZone(time - 24 * 60 * 60 * 1000).dateKey
+      : et.dateKey;
+    return { session: 'Asia', sessionKey: `Asia_${sessionDateKey}` };
+  }
+  if (isWeekday && inSession(et.minuteOfDay, 2 * 60, 8 * 60 + 30)) {
+    return { session: 'London', sessionKey: `London_${et.dateKey}` };
+  }
+  if (isWeekday && inSession(et.minuteOfDay, 8 * 60 + 30, 16 * 60)) {
+    return { session: 'New York', sessionKey: `New York_${et.dateKey}` };
+  }
+  return { session: 'Off-Hours', sessionKey: null };
 }
 
-function getTargetSessionHighLow(klines: Kline[], targetSession: string, currentDate: Date) {
-  let startHour = 0, endHour = 0;
-  let targetDate = new Date(currentDate);
-  
-  if (targetSession === 'London') {
-    startHour = 7; endHour = 16;
-  } else if (targetSession === 'Asia') {
-    startHour = 0; endHour = 8;
-  } else if (targetSession === 'New York') {
-    startHour = 13; endHour = 22;
-    if (currentDate.getUTCHours() < 13) {
-      targetDate.setUTCDate(targetDate.getUTCDate() - 1);
+function getRollingTargetSession(currentSession: RollingSession): Exclude<RollingSession, 'Off-Hours'> | null {
+  if (currentSession === 'Asia') return 'New York';
+  if (currentSession === 'London') return 'Asia';
+  if (currentSession === 'New York') return 'London';
+  return null;
+}
+
+function getSessionInfo(date: Date) {
+  const { session } = getRollingSessionMeta(date.getTime());
+  return { current: session, target: getRollingTargetSession(session) };
+}
+
+function getTargetSessionHighLow(
+  klines: Kline[],
+  targetSession: Exclude<RollingSession, 'Off-Hours'>,
+  currentDate: Date
+) {
+  const ranges: Array<{
+    session: Exclude<RollingSession, 'Off-Hours'>;
+    sessionKey: string;
+    endTime: number;
+    high: number;
+    low: number;
+  }> = [];
+  let active: {
+    session: Exclude<RollingSession, 'Off-Hours'>;
+    sessionKey: string;
+    endTime: number;
+    high: number;
+    low: number;
+  } | null = null;
+
+  for (const bar of klines) {
+    const meta = getRollingSessionMeta(bar.time);
+    if (meta.session === 'Off-Hours' || !meta.sessionKey) {
+      if (active) {
+        ranges.push(active);
+        active = null;
+      }
+      continue;
+    }
+
+    if (!active || active.sessionKey !== meta.sessionKey) {
+      if (active) ranges.push(active);
+      active = {
+        session: meta.session,
+        sessionKey: meta.sessionKey,
+        endTime: bar.time,
+        high: bar.high,
+        low: bar.low,
+      };
+    } else {
+      active.high = Math.max(active.high, bar.high);
+      active.low = Math.min(active.low, bar.low);
+      active.endTime = bar.time;
     }
   }
 
-  const targetYear = targetDate.getUTCFullYear();
-  const targetMonth = targetDate.getUTCMonth();
-  const targetDay = targetDate.getUTCDate();
+  if (active) ranges.push(active);
 
-  const sessionKlines = klines.filter(k => {
-    const d = new Date(k.time);
-    return d.getUTCFullYear() === targetYear &&
-           d.getUTCMonth() === targetMonth &&
-           d.getUTCDate() === targetDay &&
-           d.getUTCHours() >= startHour &&
-           d.getUTCHours() < endHour;
-  });
+  const currentTime = currentDate.getTime();
+  for (let i = ranges.length - 1; i >= 0; i--) {
+    const range = ranges[i];
+    if (range.session === targetSession && range.endTime < currentTime) {
+      return { high: range.high, low: range.low };
+    }
+  }
 
-  if (sessionKlines.length === 0) return null;
+  return null;
+}
 
-  const high = Math.max(...sessionKlines.map(k => k.high));
-  const low = Math.min(...sessionKlines.map(k => k.low));
-  return { high, low };
+function findLastIndexBy<T>(items: T[], predicate: (item: T, index: number) => boolean) {
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (predicate(items[i], i)) return i;
+  }
+  return -1;
 }
 
 function findOB(klines: Kline[], sweepIndex: number, type: 'BULLISH' | 'BEARISH') {
@@ -672,6 +735,14 @@ async function runSMCStrategy(symbol: string): Promise<StrategyResult> {
   const now = new Date();
   const { current: currentSession, target: targetSession } = getSessionInfo(now);
   
+  if (!targetSession) {
+    logs.push(`⚠️ 目前不在主要 session 內，暫不建立 Rolling Session 劇本`);
+    return {
+      symbol, time: now.toISOString(), regime: 'WAITING', price: 0, direction: 'NEUTRAL',
+      entry_low: 0, entry_high: 0, stop: 0, target: 0, rr: 0, logs
+    };
+  }
+
   const sessionColors: Record<string, string> = {
     'Asia': '🟦 亞洲盤 (Asian Session)',
     'London': '🟨 倫敦盤 (London Session)',
@@ -708,18 +779,21 @@ async function runSMCStrategy(symbol: string): Promise<StrategyResult> {
   let sweepIndex = -1;
   
   const recent5m = klines5m.slice(-24);
+  const recentOffset = Math.max(0, klines5m.length - recent5m.length);
   const recentMax = Math.max(...recent5m.map(k => k.high));
   const recentMin = Math.min(...recent5m.map(k => k.low));
   
   if (recentMax > targetHigh) {
     sweepState = 'SWEEP_HIGH';
     sweepHigh = recentMax;
-    sweepIndex = klines5m.findIndex(k => k.high === recentMax);
+    const localIndex = findLastIndexBy(recent5m, k => k.high === recentMax);
+    sweepIndex = localIndex >= 0 ? recentOffset + localIndex : -1;
     logs.push(`  - ⚠️ 狀態: 【高度關注】目前價格曾刺穿 ${targetSession} High (最高來到 ${sweepHigh.toFixed(decimals)})`);
   } else if (recentMin < targetLow) {
     sweepState = 'SWEEP_LOW';
     sweepLow = recentMin;
-    sweepIndex = klines5m.findIndex(k => k.low === recentMin);
+    const localIndex = findLastIndexBy(recent5m, k => k.low === recentMin);
+    sweepIndex = localIndex >= 0 ? recentOffset + localIndex : -1;
     logs.push(`  - ⚠️ 狀態: 【高度關注】目前價格曾刺穿 ${targetSession} Low (最低來到 ${sweepLow.toFixed(decimals)})`);
   } else {
     logs.push(`  - 狀態: 價格在區間內震盪，等待流動性獵取 (Sweep)。`);
