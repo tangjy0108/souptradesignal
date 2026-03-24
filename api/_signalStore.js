@@ -61,6 +61,11 @@ function normalizeNumber(value) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function quoteFilterValue(value) {
+  const normalized = normalizeText(value);
+  return `"${normalized.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 function toSignalRow(signal) {
   const signalKey = normalizeText(signal?.signalKey || signal?.signal_key || signal?.fingerprint || signal?.id);
   if (!signalKey) {
@@ -114,12 +119,51 @@ function toSignalFeedItem(row) {
   };
 }
 
-export async function listSignals(limit = 30) {
-  const safeLimit = Math.min(Math.max(Number(limit) || 30, 1), 100);
-  const rows = await supabaseRequest(`/signals?select=*&order=updated_at.desc&limit=${safeLimit}`, {
+export async function listSignals(limitOrOptions = 30) {
+  const options =
+    typeof limitOrOptions === 'number'
+      ? { limit: limitOrOptions }
+      : (limitOrOptions || {});
+
+  const safeLimit = Math.min(Math.max(Number(options.limit) || 30, 1), 200);
+  const params = new URLSearchParams();
+  params.set('select', '*');
+  params.set('order', 'updated_at.desc');
+  params.set('limit', String(safeLimit));
+
+  if (Array.isArray(options.statuses) && options.statuses.length > 0) {
+    params.set('status', `in.(${options.statuses.map(quoteFilterValue).join(',')})`);
+  }
+
+  if (Array.isArray(options.signalKeys) && options.signalKeys.length > 0) {
+    params.set('signal_key', `in.(${options.signalKeys.map(quoteFilterValue).join(',')})`);
+  }
+
+  if (Array.isArray(options.symbols) && options.symbols.length > 0) {
+    params.set('symbol', `in.(${options.symbols.map(quoteFilterValue).join(',')})`);
+  }
+
+  const rows = await supabaseRequest(`/signals?${params.toString()}`, {
     method: 'GET',
   });
   return Array.isArray(rows) ? rows.map(toSignalFeedItem) : [];
+}
+
+export async function listSignalsByKeys(signalKeys) {
+  const normalized = Array.isArray(signalKeys) ? signalKeys.filter(Boolean) : [];
+  if (normalized.length === 0) return [];
+
+  return listSignals({
+    limit: normalized.length,
+    signalKeys: normalized,
+  });
+}
+
+export async function listTrackableSignals(limit = 100) {
+  return listSignals({
+    limit,
+    statuses: ['LIVE_SIGNAL', 'ACTIVE_TRADE'],
+  });
 }
 
 export async function upsertSignals(input) {
