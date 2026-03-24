@@ -104,6 +104,7 @@ type SignalFeedStatus =
 
 type SignalFeedItem = {
   id: string;
+  signalKey: string;
   fingerprint: string;
   symbol: string;
   strategyId: string;
@@ -123,13 +124,69 @@ type SignalFeedItem = {
   updatedAt: string;
 };
 
+type SignalFeedStatusUpdate = Pick<SignalFeedItem, 'signalKey' | 'status' | 'updatedAt'>;
+
 function readSignalFeed(): SignalFeedItem[] {
   try {
     const raw = JSON.parse(localStorage.getItem(SIGNAL_FEED_KEY) || '[]');
-    return Array.isArray(raw) ? raw : [];
+    if (!Array.isArray(raw)) return [];
+    return raw.map((item: any) => {
+      const signalKey = item?.signalKey || item?.signal_key || item?.fingerprint || item?.id || `${item?.symbol || 'signal'}-${item?.createdAt || Date.now()}`;
+      return {
+        ...item,
+        id: signalKey,
+        signalKey,
+        fingerprint: item?.fingerprint || signalKey,
+      };
+    });
   } catch {
     return [];
   }
+}
+
+async function requestSignalFeedApi(method: string, body?: Record<string, unknown>) {
+  const res = await fetch('/api/signals', {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const text = await res.text();
+  const json = text ? JSON.parse(text) : {};
+  if (!res.ok) {
+    throw new Error(json.error || `Signal Feed API error (${res.status})`);
+  }
+  return json;
+}
+
+async function fetchSignalFeed(): Promise<SignalFeedItem[]> {
+  const json = await requestSignalFeedApi('GET');
+  return Array.isArray(json.items) ? json.items : [];
+}
+
+async function upsertSignalFeedItemRemote(item: SignalFeedItem): Promise<SignalFeedItem | null> {
+  const json = await requestSignalFeedApi('POST', { signal: item });
+  return Array.isArray(json.items) ? (json.items[0] || null) : null;
+}
+
+async function upsertSignalFeedItemsRemote(items: SignalFeedItem[]): Promise<SignalFeedItem[]> {
+  const json = await requestSignalFeedApi('POST', { signals: items });
+  return Array.isArray(json.items) ? json.items : [];
+}
+
+async function syncSignalFeedStatuses(updates: SignalFeedStatusUpdate[]) {
+  if (!updates.length) return;
+  await requestSignalFeedApi('PATCH', { updates });
+}
+
+async function clearSignalFeedRemote() {
+  await requestSignalFeedApi('DELETE');
+}
+
+function isTerminalSignalStatus(status: SignalFeedStatus) {
+  return status === 'TP_HIT' || status === 'SL_HIT';
 }
 
 function getResultLifecycleState(result: StrategyResult | null): SignalFeedStatus | null {
@@ -149,7 +206,7 @@ function getSignalStatusTone(status: SignalFeedStatus) {
 }
 
 function formatSignalStatus(status: SignalFeedStatus) {
-  return status.replaceAll('_', ' ');
+  return status.split('_').join(' ');
 }
 
 function toSignalFeedItem(
@@ -161,52 +218,55 @@ function toSignalFeedItem(
   const lifecycleState = getResultLifecycleState(result);
   if (!lifecycleState) return null;
 
-  const killzone = result.killzoneDetails;
+  const resolvedResult = result!;
+  const killzone = resolvedResult.killzoneDetails;
   const session = killzone?.currentSession && killzone.currentSession !== 'Off-Hours'
     ? killzone.currentSession
-    : result.smcDetails?.currentSession;
+    : resolvedResult.smcDetails?.currentSession;
   const setupType = killzone?.setupType && killzone.setupType !== 'NONE' ? killzone.setupType : undefined;
   const bias = killzone?.bias && killzone.bias !== 'NEUTRAL' ? killzone.bias : undefined;
   const updatedAt = new Date().toISOString();
   const precision = (value: number) => Number.isFinite(value) ? value.toFixed(6) : '0';
-  const fingerprint = [
+  const signalKey = [
     strategyId,
     symbol,
-    result.regime,
-    result.direction,
-    lifecycleState,
-    precision(result.entry_low),
-    precision(result.entry_high),
-    precision(result.stop),
-    precision(result.target),
+    resolvedResult.regime,
+    resolvedResult.direction,
+    precision(resolvedResult.entry_low),
+    precision(resolvedResult.entry_high),
+    precision(resolvedResult.stop),
+    precision(resolvedResult.target),
     precision(killzone?.sweepLevel || 0),
     precision(killzone?.mssLevel || 0),
+    updatedAt.slice(0, 10),
   ].join('|');
+  const fingerprint = `${signalKey}|${lifecycleState}`;
 
   return {
-    id: fingerprint,
+    id: signalKey,
+    signalKey,
     fingerprint,
     symbol,
     strategyId,
     strategyName,
-    direction: result.direction,
-    regime: result.regime,
+    direction: resolvedResult.direction,
+    regime: resolvedResult.regime,
     status: lifecycleState,
     session,
     setupType,
     bias,
-    entryLow: result.entry_low,
-    entryHigh: result.entry_high,
-    stop: result.stop,
-    target: result.target,
-    rr: result.rr,
+    entryLow: resolvedResult.entry_low,
+    entryHigh: resolvedResult.entry_high,
+    stop: resolvedResult.stop,
+    target: resolvedResult.target,
+    rr: resolvedResult.rr,
     createdAt: updatedAt,
     updatedAt,
   };
 }
 
 function upsertSignalFeed(prev: SignalFeedItem[], nextItem: SignalFeedItem) {
-  const idx = prev.findIndex(item => item.fingerprint === nextItem.fingerprint);
+  const idx = prev.findIndex(item => item.signalKey === nextItem.signalKey);
   if (idx >= 0) {
     const existing = prev[idx];
     const merged: SignalFeedItem = {
@@ -214,7 +274,7 @@ function upsertSignalFeed(prev: SignalFeedItem[], nextItem: SignalFeedItem) {
       ...nextItem,
       createdAt: existing.createdAt,
       updatedAt: nextItem.updatedAt,
-      status: existing.status === 'TP_HIT' || existing.status === 'SL_HIT' ? existing.status : nextItem.status,
+      status: isTerminalSignalStatus(existing.status) ? existing.status : nextItem.status,
     };
     return [merged, ...prev.filter((_, i) => i !== idx)].slice(0, 30);
   }
@@ -306,6 +366,7 @@ export default function App() {
   const [harmonicPatterns, setHarmonicPatterns]   = useState<HarmonicPattern[]>([]);
   const [snrFvgResult, setSnrFvgResult]         = useState<SNRFVGResult | null>(null);
   const [chartPreset, setChartPreset]           = useState<ChartPreset | null>(() => readChartPreset());
+  const signalFeedRef = useRef<SignalFeedItem[]>(readSignalFeed());
 
   // 監聽 BacktestPanel 的「載入至圖表」
   useEffect(() => {
@@ -317,6 +378,44 @@ export default function App() {
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
   }, []);
+
+  useEffect(() => {
+    signalFeedRef.current = signalFeed;
+  }, [signalFeed]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const cached = readSignalFeed();
+
+    (async () => {
+      try {
+        const remote = await fetchSignalFeed();
+        if (cancelled) return;
+        if (remote.length > 0) {
+          setSignalFeed(remote);
+          return;
+        }
+        if (cached.length > 0) {
+          const migrated = await upsertSignalFeedItemsRemote(cached);
+          if (!cancelled) {
+            setSignalFeed(migrated.length > 0 ? migrated : cached);
+          }
+          return;
+        }
+        setSignalFeed([]);
+      } catch (err) {
+        console.warn('Failed to load signal feed from API:', err);
+        if (!cancelled) {
+          setSignalFeed(cached);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const harmonicPattern = harmonicPatterns[0] ?? null;
   const [mobileTab, setMobileTab]     = useState<MobileTab>('chart');
 
@@ -516,27 +615,57 @@ export default function App() {
     const strategyName = STRATEGIES.find(s => s.id === strategyId)?.name || strategyId;
     const nextItem = toSignalFeedItem(strategyResult, strategyId, strategyName, symbol);
     if (!nextItem) return;
-    setSignalFeed(prev => upsertSignalFeed(prev, nextItem));
+
+    const existing = signalFeedRef.current.find(item => item.signalKey === nextItem.signalKey);
+    const persistedItem = existing && isTerminalSignalStatus(existing.status)
+      ? { ...nextItem, status: existing.status, createdAt: existing.createdAt, updatedAt: existing.updatedAt }
+      : nextItem;
+
+    setSignalFeed(prev => upsertSignalFeed(prev, persistedItem));
+    void upsertSignalFeedItemRemote(persistedItem)
+      .then(saved => {
+        if (saved) {
+          setSignalFeed(prev => upsertSignalFeed(prev, saved));
+        }
+      })
+      .catch(err => {
+        console.warn('Failed to persist signal feed item:', err);
+      });
   }, [strategyResult, strategyId, symbol]);
 
   useEffect(() => {
-    if (!symbol || currentPrice <= 0) return;
-    setSignalFeed(prev => {
-      let changed = false;
-      const next = prev.map(item => {
-        if (item.symbol !== symbol) return item;
-        const nextStatus = resolveSignalOutcome(item, currentPrice);
-        if (nextStatus === item.status) return item;
-        changed = true;
-        return {
-          ...item,
-          status: nextStatus,
-          updatedAt: new Date().toISOString(),
-        };
-      });
-      return changed ? next : prev;
+    if (!symbol || currentPrice <= 0 || signalFeed.length === 0) return;
+
+    const updates: SignalFeedStatusUpdate[] = [];
+    const next = signalFeed.map(item => {
+      if (item.symbol !== symbol) return item;
+      const nextStatus = resolveSignalOutcome(item, currentPrice);
+      if (nextStatus === item.status) return item;
+      const updatedAt = new Date().toISOString();
+      updates.push({ signalKey: item.signalKey, status: nextStatus, updatedAt });
+      return {
+        ...item,
+        status: nextStatus,
+        updatedAt,
+      };
     });
-  }, [symbol, currentPrice]);
+
+    if (updates.length === 0) return;
+
+    setSignalFeed(next);
+    void syncSignalFeedStatuses(updates).catch(err => {
+      console.warn('Failed to sync signal feed statuses:', err);
+    });
+  }, [signalFeed, symbol, currentPrice]);
+
+  const handleClearSignalFeed = useCallback(async () => {
+    try {
+      await clearSignalFeedRemote();
+      setSignalFeed([]);
+    } catch (err) {
+      console.warn('Failed to clear signal feed:', err);
+    }
+  }, []);
 
   const currentResultState = strategyResult ? getResultLifecycleState(strategyResult) : null;
 
@@ -830,7 +959,7 @@ export default function App() {
         )}
       </div>
       <div className="text-[10px] text-[#787B86] mb-3">
-        目前會在 app 內依照最新價格自動標記 TP / SL。
+        目前會依照最新價格自動標記 TP / SL，並同步保存到後端。
       </div>
       {items.length === 0 ? (
         <div className="text-xs text-[#787B86] text-center py-3">尚無歷史訊號</div>
@@ -1199,7 +1328,7 @@ export default function App() {
           </div>
         ) : null}
       </div>
-      <SignalFeedPanel items={signalFeed} onClear={() => setSignalFeed([])} />
+      <SignalFeedPanel items={signalFeed} onClear={handleClearSignalFeed} />
       <MTFPanel />
 
       {/* ── 諧波掃描器 ── */}
