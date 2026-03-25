@@ -1,7 +1,7 @@
 import { clearSignals, listSignals, updateSignalStatuses, upsertSignalsWithMeta } from './_signalStore.js';
 import { sendTelegram } from './_telegram.js';
 
-const TG_NOTIFY_STATUSES = new Set(['LIVE_SIGNAL', 'WAITING_CONFIRM']);
+const TG_NOTIFY_LIFECYCLE_STATES = new Set(['LIVE_SIGNAL', 'WAITING_CONFIRM']);
 
 function readJsonBody(req) {
   if (!req.body) return {};
@@ -24,28 +24,34 @@ function formatPrice(value) {
   return price.toFixed(8);
 }
 
-function formatStatus(status) {
-  return String(status || '').split('_').join(' ');
+function formatStatusLabel(item) {
+  if (!item) return '';
+  if (item.status === 'OPEN') {
+    return String(item.lifecycleState || 'LIVE_SIGNAL').split('_').join(' ');
+  }
+  return [item.closeReason, item.closeOutcome].filter(Boolean).join(' ');
 }
 
 function shouldNotifySignalChange(previous, current) {
-  if (!current || !TG_NOTIFY_STATUSES.has(current.status)) return false;
+  if (!current || current.status !== 'OPEN') return false;
+  if (!TG_NOTIFY_LIFECYCLE_STATES.has(current.lifecycleState)) return false;
 
   // Killzone LIVE signals are already handled by backend cron; avoid double Telegram sends when the app is open.
-  if (current.strategyId === 'ict_killzone_opt3' && current.status === 'LIVE_SIGNAL') {
+  if (current.strategyId === 'ict_killzone_opt3' && current.lifecycleState === 'LIVE_SIGNAL') {
     return false;
   }
 
   if (!previous) return true;
 
   return previous.status !== current.status
+    || previous.lifecycleState !== current.lifecycleState
     || previous.direction !== current.direction
     || previous.regime !== current.regime
     || previous.signalKey !== current.signalKey;
 }
 
 function buildSignalNotificationMessage(item) {
-  const emoji = item.status === 'WAITING_CONFIRM'
+  const emoji = item.lifecycleState === 'WAITING_CONFIRM'
     ? '🟠'
     : item.direction === 'LONG'
       ? '🟢'
@@ -54,7 +60,7 @@ function buildSignalNotificationMessage(item) {
         : '🔵';
   const updatedTw = new Date(item.updatedAt || Date.now()).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' });
   const lines = [
-    emoji + ' <b>' + item.symbol + ' ' + formatStatus(item.status) + '</b>',
+    emoji + ' <b>' + item.symbol + ' ' + formatStatusLabel(item) + '</b>',
     'Strategy：<b>' + (item.strategyName || item.strategyId) + '</b>',
     '方向：<b>' + (item.direction || 'NEUTRAL') + '</b>',
   ];

@@ -1,5 +1,5 @@
 import { fetchKlines, SCAN_SYMBOLS } from './_strategy.js';
-import { listTrackableSignals, updateSignalStatuses, upsertSignalsWithMeta } from './_signalStore.js';
+import { listOpenSignals, listSignalsByKeys, updateSignalStatuses, upsertSignalsWithMeta } from './_signalStore.js';
 import { sendTelegram } from './_telegram.js';
 
 const recentlySentSessionLiquidity = new Set();
@@ -223,20 +223,106 @@ function fmt(price) {
   return price.toFixed(8);
 }
 
-function getTrackableSignalOutcome(item, price) {
-  if (!Number.isFinite(price) || price <= 0) return item.status;
-  if (item.status !== 'LIVE_SIGNAL' && item.status !== 'ACTIVE_TRADE') return item.status;
-  if (item.stop <= 0 || item.target <= 0) return item.status;
+const TRACKABLE_SIGNAL_LIFECYCLE_STATES = new Set(['LIVE_SIGNAL', 'ACTIVE_TRADE']);
+
+function getReferenceEntryPrice(item) {
+  const entryLow = Number(item.entryLow) || 0;
+  const entryHigh = Number(item.entryHigh) || 0;
+  const entryMin = entryLow > 0 && entryHigh > 0 ? Math.min(entryLow, entryHigh) : (entryLow || entryHigh);
+  const entryMax = entryLow > 0 && entryHigh > 0 ? Math.max(entryLow, entryHigh) : (entryHigh || entryLow);
+
+  if (item.direction === 'SHORT') return entryMin;
+  if (item.direction === 'LONG') return entryMax;
+  return entryHigh || entryLow;
+}
+
+function resolveOpenSignalOutcome(item, price) {
+  if (!TRACKABLE_SIGNAL_LIFECYCLE_STATES.has(item.lifecycleState)) {
+    return 'NOT_FILLED';
+  }
+
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const entryPrice = getReferenceEntryPrice(item);
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return null;
 
   if (item.direction === 'LONG') {
-    if (price >= item.target) return 'TP_HIT';
-    if (price <= item.stop) return 'SL_HIT';
+    if (price > entryPrice) return 'PROFIT';
+    if (price < entryPrice) return 'LOSS';
+    return 'FLAT';
+  }
+
+  if (item.direction === 'SHORT') {
+    if (price < entryPrice) return 'PROFIT';
+    if (price > entryPrice) return 'LOSS';
+    return 'FLAT';
+  }
+
+  return 'FLAT';
+}
+
+function buildClosedSignalUpdate(item, closeReason, price, updatedAt) {
+  const closeOutcome = closeReason === 'TP'
+    ? 'PROFIT'
+    : closeReason === 'SL'
+      ? 'LOSS'
+      : resolveOpenSignalOutcome(item, price);
+
+  if (!closeOutcome) return null;
+
+  return {
+    signalKey: item.signalKey,
+    status: 'CLOSED',
+    lifecycleState: item.lifecycleState,
+    closeReason,
+    closeOutcome,
+    updatedAt,
+  };
+}
+
+function getTrackableSignalCloseReason(item, price) {
+  if (!Number.isFinite(price) || price <= 0) return null;
+  if (item.status !== 'OPEN') return null;
+  if (!TRACKABLE_SIGNAL_LIFECYCLE_STATES.has(item.lifecycleState)) return null;
+  if (item.stop <= 0 || item.target <= 0) return null;
+
+  if (item.direction === 'LONG') {
+    if (price >= item.target) return 'TP';
+    if (price <= item.stop) return 'SL';
   }
   if (item.direction === 'SHORT') {
-    if (price <= item.target) return 'TP_HIT';
-    if (price >= item.stop) return 'SL_HIT';
+    if (price <= item.target) return 'TP';
+    if (price >= item.stop) return 'SL';
   }
-  return item.status;
+  return null;
+}
+
+function getKillzoneTimeoutMinute(item) {
+  if (item.strategyId !== KILLZONE_STRATEGY_ID) return null;
+
+  if (item.session === 'London') {
+    return item.lifecycleState === 'WAITING_CONFIRM' || item.lifecycleState === 'WAITING_RETEST'
+      ? 5 * 60
+      : 8 * 60 + 30;
+  }
+
+  if (item.session === 'New York') {
+    return 11 * 60;
+  }
+
+  return null;
+}
+
+function shouldTimeoutSignal(item, now = new Date()) {
+  if (item.status !== 'OPEN') return false;
+  const cutoffMinute = getKillzoneTimeoutMinute(item);
+  if (!Number.isFinite(cutoffMinute)) return false;
+
+  const nowEt = getTimePartsInZone(now, 'America/New_York');
+  const signalDateKey = getSignalDateKey(item.createdAt || item.updatedAt);
+
+  if (nowEt.dateKey > signalDateKey) return true;
+  if (nowEt.dateKey < signalDateKey) return false;
+  return nowEt.minuteOfDay >= cutoffMinute;
 }
 
 function toPersistedKillzoneSignal(signal, updatedAt = new Date().toISOString()) {
@@ -245,13 +331,13 @@ function toPersistedKillzoneSignal(signal, updatedAt = new Date().toISOString())
 
   return {
     signalKey,
-    fingerprint: `${signalKey}|LIVE_SIGNAL`,
     symbol: signal.sym,
     strategyId: KILLZONE_STRATEGY_ID,
     strategyName: KILLZONE_STRATEGY_NAME,
     direction: signal.direction,
     regime: `${signal.setupType}_${signal.bias || 'NEUTRAL'}_${signal.currentSession}`,
-    status: 'LIVE_SIGNAL',
+    status: 'OPEN',
+    lifecycleState: 'LIVE_SIGNAL',
     session: signal.currentSession,
     setupType: signal.setupType,
     bias: signal.bias,
@@ -260,6 +346,7 @@ function toPersistedKillzoneSignal(signal, updatedAt = new Date().toISOString())
     stop: signal.stop,
     target: signal.target,
     rr: signal.rr,
+    marketPrice: signal.price,
     updatedAt,
   };
 }
@@ -270,12 +357,12 @@ async function persistKillzoneSignals(signals, updatedAt = new Date().toISOStrin
   }
 
   const rows = signals.map(signal => toPersistedKillzoneSignal(signal, updatedAt));
-  const { items: saved, changes } = await upsertSignalsWithMeta(rows);
   const existingSignalKeys = new Set(
-    changes
-      .filter(change => change.previous)
-      .map(change => change.current.signalKey)
+    (await listSignalsByKeys(rows.map(item => item.signalKey))).map(item => item.signalKey)
   );
+  const { items: affectedItems, changes } = await upsertSignalsWithMeta(rows);
+  const signalKeySet = new Set(rows.map(item => item.signalKey));
+  const saved = affectedItems.filter(item => signalKeySet.has(item.signalKey));
 
   return { saved, existingSignalKeys, changes };
 }
@@ -302,11 +389,13 @@ async function fetchLatestPrice(symbol) {
   return null;
 }
 
-async function syncTrackableSignalStatuses(now = new Date()) {
-  const trackableSignals = await listTrackableSignals(200);
-  if (!trackableSignals.length) return [];
+async function syncOpenSignalStatuses(now = new Date()) {
+  const openSignals = await listOpenSignals(400);
+  if (!openSignals.length) {
+    return { events: [], tpslEvents: [], timeoutEvents: [] };
+  }
 
-  const symbols = [...new Set(trackableSignals.map(item => item.symbol).filter(Boolean))];
+  const symbols = [...new Set(openSignals.map(item => item.symbol).filter(Boolean))];
   const priceResults = await Promise.all(
     symbols.map(async symbol => [symbol, await fetchLatestPrice(symbol)])
   );
@@ -317,31 +406,42 @@ async function syncTrackableSignalStatuses(now = new Date()) {
   const updatedAt = now.toISOString();
   const updates = [];
   const events = [];
+  const tpslEvents = [];
+  const timeoutEvents = [];
 
-  for (const item of trackableSignals) {
+  for (const item of openSignals) {
     const price = priceMap.get(item.symbol);
-    const nextStatus = getTrackableSignalOutcome(item, price);
-    if (nextStatus === item.status) continue;
+    const tpSlReason = getTrackableSignalCloseReason(item, price);
+    const update = tpSlReason
+      ? buildClosedSignalUpdate(item, tpSlReason, price, updatedAt)
+      : shouldTimeoutSignal(item, now)
+        ? buildClosedSignalUpdate(item, 'TIMEOUT', price, updatedAt)
+        : null;
 
-    updates.push({
-      signalKey: item.signalKey,
-      status: nextStatus,
-      updatedAt,
-    });
+    if (!update) continue;
 
-    events.push({
+    updates.push(update);
+
+    const event = {
       ...item,
-      status: nextStatus,
+      ...update,
       price,
       updatedAt,
-    });
+    };
+
+    events.push(event);
+    if (tpSlReason) {
+      tpslEvents.push(event);
+    } else {
+      timeoutEvents.push(event);
+    }
   }
 
   if (updates.length > 0) {
     await updateSignalStatuses(updates);
   }
 
-  return events;
+  return { events, tpslEvents, timeoutEvents };
 }
 
 function shouldRunSignalScans(now = new Date()) {
@@ -628,10 +728,11 @@ async function runICTKillzoneOpt3Scan(now = new Date()) {
         ...signal,
         candleTime: current.time,
       };
+      const signalKey = buildKillzoneSignalKey(persistedSignal);
 
       signals.push({
         ...persistedSignal,
-        signalKey: buildKillzoneSignalKey(persistedSignal),
+        signalKey,
       });
     } catch (_) {}
   }));
@@ -742,11 +843,11 @@ export default async function handler(req, res) {
 
   try {
     const shouldRunFiveMinuteScans = shouldRunSignalScans(now);
-    const tpslEvents = await syncTrackableSignalStatuses(now);
+    const { events: closedSignalEvents, tpslEvents, timeoutEvents } = await syncOpenSignalStatuses(now);
 
     for (const event of tpslEvents) {
-      const emoji = event.status === 'TP_HIT' ? '🎯' : '🛑';
-      const statusLabel = event.status === 'TP_HIT' ? 'TP Hit' : 'SL Hit';
+      const emoji = event.closeReason === 'TP' ? '🎯' : '🛑';
+      const statusLabel = event.closeReason === 'TP' ? 'TP Profit' : 'SL Loss';
       const entry = event.entryHigh > 0 ? event.entryHigh : event.entryLow;
       const msg = [
         `${emoji} <b>${event.symbol} ${statusLabel}</b>`,
@@ -870,11 +971,14 @@ export default async function handler(req, res) {
         killzoneDuplicatesSkipped,
         sessionLiquidity: sessionLiquiditySignals.length,
         tpslUpdated: tpslEvents.length,
+        timedOut: timeoutEvents.length,
       },
-      updatedSignals: tpslEvents.map(event => ({
+      updatedSignals: closedSignalEvents.map(event => ({
         signalKey: event.signalKey,
         symbol: event.symbol,
         status: event.status,
+        closeReason: event.closeReason,
+        closeOutcome: event.closeOutcome,
       })),
       sendErrors,
     });

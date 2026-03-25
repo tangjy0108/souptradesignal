@@ -1128,6 +1128,23 @@ async function runIctKillzoneOpt3Strategy(symbol: string): Promise<StrategyResul
     };
   };
 
+  const getReferenceEntryPrice = (side: 'LONG' | 'SHORT', entryLow: number, entryHigh: number) => {
+    return side === 'LONG'
+      ? Math.max(entryLow, entryHigh)
+      : Math.min(entryLow, entryHigh);
+  };
+
+  const calcZoneRr = (
+    side: 'LONG' | 'SHORT',
+    entryLow: number,
+    entryHigh: number,
+    stop: number,
+    target: number,
+  ) => {
+    const entryPrice = getReferenceEntryPrice(side, entryLow, entryHigh);
+    return Math.abs(target - entryPrice) / Math.max(Math.abs(entryPrice - stop), 0.0000001);
+  };
+
   for (let i = 3; i < klines5m.length; i++) {
     const bar = klines5m[i];
     const prev = klines5m[i - 1];
@@ -1207,7 +1224,7 @@ async function runIctKillzoneOpt3Strategy(symbol: string): Promise<StrategyResul
       } else {
         const touchedZone = bar.low <= pendingRetest.entryHigh && bar.high >= pendingRetest.entryLow;
         if (touchedZone) {
-          const entryPrice = (pendingRetest.entryLow + pendingRetest.entryHigh) / 2;
+          const entryPrice = getReferenceEntryPrice(pendingRetest.side, pendingRetest.entryLow, pendingRetest.entryHigh);
           activateTrade(pendingRetest, entryPrice, i);
           pendingRetest = null;
         }
@@ -1254,7 +1271,7 @@ async function runIctKillzoneOpt3Strategy(symbol: string): Promise<StrategyResul
         const entryHigh = shouldUseRetest ? bar.low : bar.close;
         const stop = bullSweepExtreme - stopBuffer;
         if (entryLow > stop) {
-          const entryRef = shouldUseRetest ? (entryLow + entryHigh) / 2 : bar.close;
+          const entryRef = shouldUseRetest ? getReferenceEntryPrice('LONG', entryLow, entryHigh) : bar.close;
           const target = entryRef + (entryRef - stop) * rrTarget;
           if (shouldUseRetest) {
             armRetest('LONG', setupType, bullSetupSession, entryLow, entryHigh, stop, target, i, bullSweepSide!, bullSweepLevel, bullSweepExtreme, bullMssLevel, entryLow, entryHigh);
@@ -1292,7 +1309,7 @@ async function runIctKillzoneOpt3Strategy(symbol: string): Promise<StrategyResul
         const entryHigh = shouldUseRetest ? prev2.low : bar.close;
         const stop = bearSweepExtreme + stopBuffer;
         if (entryHigh < stop) {
-          const entryRef = shouldUseRetest ? (entryLow + entryHigh) / 2 : bar.close;
+          const entryRef = shouldUseRetest ? getReferenceEntryPrice('SHORT', entryLow, entryHigh) : bar.close;
           const target = entryRef - (stop - entryRef) * rrTarget;
           if (shouldUseRetest) {
             armRetest('SHORT', setupType, bearSetupSession, entryLow, entryHigh, stop, target, i, bearSweepSide!, bearSweepLevel, bearSweepExtreme, bearMssLevel, entryLow, entryHigh);
@@ -1358,7 +1375,7 @@ async function runIctKillzoneOpt3Strategy(symbol: string): Promise<StrategyResul
         const entryHigh = bar.low;
         const stop = Math.min(orLow || bar.low, prev.low, prev2.low) - stopBuffer;
         if (entryLow > stop) {
-          const entryRef = (entryLow + entryHigh) / 2;
+          const entryRef = getReferenceEntryPrice('LONG', entryLow, entryHigh);
           const target = entryRef + (entryRef - stop) * rrTarget;
           armRetest('LONG', 'NY_CONTINUATION', 'New York', entryLow, entryHigh, stop, target, i, 'OR_HIGH', orHigh, bar.high, bullMssLevel, entryLow, entryHigh);
         }
@@ -1368,7 +1385,7 @@ async function runIctKillzoneOpt3Strategy(symbol: string): Promise<StrategyResul
         const entryHigh = shouldUseRetest ? prev2.low : bar.close;
         const stop = Math.max(orHigh || bar.high, prev.high, prev2.high) + stopBuffer;
         if (entryHigh < stop) {
-          const entryRef = shouldUseRetest ? (entryLow + entryHigh) / 2 : bar.close;
+          const entryRef = shouldUseRetest ? getReferenceEntryPrice('SHORT', entryLow, entryHigh) : bar.close;
           const target = entryRef - (stop - entryRef) * rrTarget;
           if (shouldUseRetest) {
             armRetest('SHORT', 'NY_CONTINUATION', 'New York', entryLow, entryHigh, stop, target, i, 'OR_LOW', orLow, bar.low, bearMssLevel, entryLow, entryHigh);
@@ -1429,7 +1446,7 @@ async function runIctKillzoneOpt3Strategy(symbol: string): Promise<StrategyResul
         snapshotEntryHigh = pendingRetest.entryHigh;
         snapshotStop = pendingRetest.stop;
         snapshotTarget = pendingRetest.target;
-        snapshotRr = Math.abs(((pendingRetest.entryLow + pendingRetest.entryHigh) / 2) - pendingRetest.target) / Math.max(Math.abs(((pendingRetest.entryLow + pendingRetest.entryHigh) / 2) - pendingRetest.stop), 0.0000001);
+        snapshotRr = calcZoneRr(pendingRetest.side, pendingRetest.entryLow, pendingRetest.entryHigh, pendingRetest.stop, pendingRetest.target);
         snapshotRegime = `${pendingRetest.setupType}_${pendingRetest.side}_WAITING_RETEST`;
       } else if (waitBullConfirm || waitBearConfirm) {
         const isBull = waitBullConfirm;

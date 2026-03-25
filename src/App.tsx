@@ -94,13 +94,16 @@ const STRATEGIES = [
 
 const SIGNAL_FEED_KEY = 'qv_signal_feed';
 
-type SignalFeedStatus =
+type SignalLifecycleState =
   | 'WAITING_CONFIRM'
   | 'WAITING_RETEST'
   | 'ACTIVE_TRADE'
-  | 'LIVE_SIGNAL'
-  | 'TP_HIT'
-  | 'SL_HIT';
+  | 'LIVE_SIGNAL';
+
+type SignalRecordStatus = 'OPEN' | 'CLOSED';
+type SignalCloseReason = 'TP' | 'SL' | 'SUPERSEDED' | 'TIMEOUT';
+type SignalCloseOutcome = 'PROFIT' | 'LOSS' | 'FLAT' | 'NOT_FILLED';
+type SignalFeedBadgeValue = SignalLifecycleState | SignalFeedItem;
 
 type SignalFeedItem = {
   id: string;
@@ -111,7 +114,10 @@ type SignalFeedItem = {
   strategyName: string;
   direction: 'LONG' | 'SHORT' | 'NEUTRAL';
   regime: string;
-  status: SignalFeedStatus;
+  status: SignalRecordStatus;
+  lifecycleState: SignalLifecycleState;
+  closeReason?: SignalCloseReason;
+  closeOutcome?: SignalCloseOutcome;
   session?: string;
   setupType?: string;
   bias?: string;
@@ -123,9 +129,10 @@ type SignalFeedItem = {
   createdAt: string;
   updatedAt: string;
   conflictKey?: string;
+  marketPrice?: number;
 };
 
-type SignalFeedStatusUpdate = Pick<SignalFeedItem, 'signalKey' | 'status' | 'updatedAt'>;
+type SignalFeedStatusUpdate = Pick<SignalFeedItem, 'signalKey' | 'status' | 'lifecycleState' | 'closeReason' | 'closeOutcome' | 'updatedAt'>;
 
 function getSignalDateKey(input?: string | number | Date) {
   const date = input instanceof Date ? input : new Date(input || Date.now());
@@ -155,23 +162,134 @@ function getSignalConflictKey(item: Partial<SignalFeedItem>) {
   return [strategyId, symbol, dateKey].join('|');
 }
 
+function buildSignalFeedFingerprint(item: Partial<SignalFeedItem>) {
+  return [
+    item.signalKey || item.id || 'signal',
+    item.status || 'OPEN',
+    item.lifecycleState || 'LIVE_SIGNAL',
+    item.closeReason || 'OPEN',
+    item.closeOutcome || 'OPEN',
+  ].join('|');
+}
+
+function getSignalReferenceEntryPrice(item: Partial<SignalFeedItem>) {
+  const entryLow = Number(item.entryLow) || 0;
+  const entryHigh = Number(item.entryHigh) || 0;
+  const entryMin = entryLow > 0 && entryHigh > 0 ? Math.min(entryLow, entryHigh) : (entryLow || entryHigh);
+  const entryMax = entryLow > 0 && entryHigh > 0 ? Math.max(entryLow, entryHigh) : (entryHigh || entryLow);
+
+  if (item.direction === 'SHORT') return entryMin;
+  if (item.direction === 'LONG') return entryMax;
+  return entryHigh || entryLow;
+}
+
+function resolveSignalLifecycleFields(item: any) {
+  const rawStatus = typeof item?.status === 'string' ? item.status : '';
+  const rawLifecycleState = typeof item?.lifecycleState === 'string'
+    ? item.lifecycleState
+    : typeof item?.lifecycle_state === 'string'
+      ? item.lifecycle_state
+      : '';
+  const rawCloseReason = typeof item?.closeReason === 'string'
+    ? item.closeReason
+    : typeof item?.close_reason === 'string'
+      ? item.close_reason
+      : '';
+  const rawCloseOutcome = typeof item?.closeOutcome === 'string'
+    ? item.closeOutcome
+    : typeof item?.close_outcome === 'string'
+      ? item.close_outcome
+      : '';
+
+  if (rawStatus === 'TP_HIT') {
+    return {
+      status: 'CLOSED' as SignalRecordStatus,
+      lifecycleState: (rawLifecycleState || 'ACTIVE_TRADE') as SignalLifecycleState,
+      closeReason: 'TP' as SignalCloseReason,
+      closeOutcome: 'PROFIT' as SignalCloseOutcome,
+    };
+  }
+
+  if (rawStatus === 'SL_HIT') {
+    return {
+      status: 'CLOSED' as SignalRecordStatus,
+      lifecycleState: (rawLifecycleState || 'ACTIVE_TRADE') as SignalLifecycleState,
+      closeReason: 'SL' as SignalCloseReason,
+      closeOutcome: 'LOSS' as SignalCloseOutcome,
+    };
+  }
+
+  if (rawStatus === 'WAITING_CONFIRM' || rawStatus === 'WAITING_RETEST' || rawStatus === 'ACTIVE_TRADE' || rawStatus === 'LIVE_SIGNAL') {
+    return {
+      status: 'OPEN' as SignalRecordStatus,
+      lifecycleState: rawStatus as SignalLifecycleState,
+      closeReason: undefined,
+      closeOutcome: undefined,
+    };
+  }
+
+  if (rawStatus === 'CLOSED') {
+    return {
+      status: 'CLOSED' as SignalRecordStatus,
+      lifecycleState: ((rawLifecycleState || (rawCloseReason === 'TP' || rawCloseReason === 'SL' ? 'ACTIVE_TRADE' : 'LIVE_SIGNAL')) as SignalLifecycleState),
+      closeReason: (rawCloseReason || undefined) as SignalCloseReason | undefined,
+      closeOutcome: (rawCloseOutcome || undefined) as SignalCloseOutcome | undefined,
+    };
+  }
+
+  if (rawStatus === 'OPEN') {
+    return {
+      status: 'OPEN' as SignalRecordStatus,
+      lifecycleState: ((rawLifecycleState || 'LIVE_SIGNAL') as SignalLifecycleState),
+      closeReason: undefined,
+      closeOutcome: undefined,
+    };
+  }
+
+  if (rawCloseReason || rawCloseOutcome) {
+    return {
+      status: 'CLOSED' as SignalRecordStatus,
+      lifecycleState: ((rawLifecycleState || 'LIVE_SIGNAL') as SignalLifecycleState),
+      closeReason: (rawCloseReason || undefined) as SignalCloseReason | undefined,
+      closeOutcome: (rawCloseOutcome || undefined) as SignalCloseOutcome | undefined,
+    };
+  }
+
+  return {
+    status: 'OPEN' as SignalRecordStatus,
+    lifecycleState: ((rawLifecycleState || 'LIVE_SIGNAL') as SignalLifecycleState),
+    closeReason: undefined,
+    closeOutcome: undefined,
+  };
+}
+
 function normalizeSignalFeedItem(item: any): SignalFeedItem {
   const strategyId = item?.strategyId || item?.strategy_id || 'unknown';
   const strategyName = item?.strategyName || item?.strategy_name || strategyId;
   const createdAt = item?.createdAt || item?.created_at || item?.updatedAt || item?.updated_at || new Date().toISOString();
   const updatedAt = item?.updatedAt || item?.updated_at || createdAt;
   const signalKey = item?.signalKey || item?.signal_key || item?.fingerprint || item?.id || [strategyId, item?.symbol || 'signal', getSignalDateKey(createdAt), item?.regime || 'UNKNOWN'].join('|');
+  const lifecycle = resolveSignalLifecycleFields(item);
 
-  return {
+  const normalizedItem: SignalFeedItem = {
     ...item,
     id: signalKey,
     signalKey,
-    fingerprint: item?.fingerprint || signalKey,
+    fingerprint: item?.fingerprint || buildSignalFeedFingerprint({
+      signalKey,
+      status: lifecycle.status,
+      lifecycleState: lifecycle.lifecycleState,
+      closeReason: lifecycle.closeReason,
+      closeOutcome: lifecycle.closeOutcome,
+    }),
     strategyId,
     strategyName,
     direction: item?.direction || 'NEUTRAL',
     regime: item?.regime || '',
-    status: item?.status || 'LIVE_SIGNAL',
+    status: lifecycle.status,
+    lifecycleState: lifecycle.lifecycleState,
+    closeReason: lifecycle.closeReason,
+    closeOutcome: lifecycle.closeOutcome,
     entryLow: Number(item?.entryLow ?? item?.entry_low) || 0,
     entryHigh: Number(item?.entryHigh ?? item?.entry_high) || 0,
     stop: Number(item?.stop) || 0,
@@ -179,6 +297,11 @@ function normalizeSignalFeedItem(item: any): SignalFeedItem {
     rr: Number(item?.rr) || 0,
     createdAt,
     updatedAt,
+    marketPrice: Number(item?.marketPrice ?? item?.market_price ?? item?.price) || undefined,
+  };
+
+  return {
+    ...normalizedItem,
     conflictKey: item?.conflictKey || getSignalConflictKey({
       strategyId,
       symbol: item?.symbol,
@@ -221,9 +344,9 @@ async function fetchSignalFeed(): Promise<SignalFeedItem[]> {
   return Array.isArray(json.items) ? json.items : [];
 }
 
-async function upsertSignalFeedItemRemote(item: SignalFeedItem): Promise<SignalFeedItem | null> {
+async function upsertSignalFeedItemRemote(item: SignalFeedItem): Promise<SignalFeedItem[]> {
   const json = await requestSignalFeedApi('POST', { signal: item });
-  return Array.isArray(json.items) ? (json.items[0] || null) : null;
+  return Array.isArray(json.items) ? json.items : [];
 }
 
 async function upsertSignalFeedItemsRemote(items: SignalFeedItem[]): Promise<SignalFeedItem[]> {
@@ -240,11 +363,11 @@ async function clearSignalFeedRemote() {
   await requestSignalFeedApi('DELETE');
 }
 
-function isTerminalSignalStatus(status: SignalFeedStatus) {
-  return status === 'TP_HIT' || status === 'SL_HIT';
+function isClosedSignal(item: Partial<SignalFeedItem>) {
+  return item.status === 'CLOSED';
 }
 
-function getResultLifecycleState(result: StrategyResult | null): SignalFeedStatus | null {
+function getResultLifecycleState(result: StrategyResult | null): SignalLifecycleState | null {
   if (!result) return null;
   const killzoneState = result.killzoneDetails?.state;
   if (killzoneState && killzoneState !== 'IDLE') return killzoneState;
@@ -252,16 +375,32 @@ function getResultLifecycleState(result: StrategyResult | null): SignalFeedStatu
   return null;
 }
 
-function getSignalStatusTone(status: SignalFeedStatus) {
-  if (status === 'TP_HIT') return 'bg-[#089981]/12 text-[#089981] border-[#089981]/25';
-  if (status === 'SL_HIT') return 'bg-[#F23645]/12 text-[#F23645] border-[#F23645]/25';
-  if (status === 'ACTIVE_TRADE' || status === 'LIVE_SIGNAL') return 'bg-[#2962FF]/12 text-[#7EA6FF] border-[#2962FF]/25';
-  if (status === 'WAITING_RETEST') return 'bg-[#FFC107]/12 text-[#FFC107] border-[#FFC107]/25';
-  return 'bg-[#A855F7]/12 text-[#C084FC] border-[#A855F7]/25';
+function getSignalStatusTone(value: SignalFeedBadgeValue) {
+  if (typeof value === 'string') {
+    if (value === 'WAITING_RETEST') return 'bg-[#FFC107]/12 text-[#FFC107] border-[#FFC107]/25';
+    if (value === 'WAITING_CONFIRM') return 'bg-[#A855F7]/12 text-[#C084FC] border-[#A855F7]/25';
+    return 'bg-[#2962FF]/12 text-[#7EA6FF] border-[#2962FF]/25';
+  }
+
+  if (value.status === 'CLOSED') {
+    if (value.closeOutcome === 'PROFIT') return 'bg-[#089981]/12 text-[#089981] border-[#089981]/25';
+    if (value.closeOutcome === 'LOSS') return 'bg-[#F23645]/12 text-[#F23645] border-[#F23645]/25';
+    return 'bg-[#787B86]/12 text-[#9CA3AF] border-[#787B86]/25';
+  }
+
+  return getSignalStatusTone(value.lifecycleState);
 }
 
-function formatSignalStatus(status: SignalFeedStatus) {
-  return status.split('_').join(' ');
+function formatSignalStatus(value: SignalFeedBadgeValue) {
+  if (typeof value === 'string') {
+    return value.split('_').join(' ');
+  }
+
+  if (value.status === 'OPEN') {
+    return formatSignalStatus(value.lifecycleState);
+  }
+
+  return [value.closeReason, value.closeOutcome].filter(Boolean).join(' ');
 }
 
 function buildSignalIdentity(
@@ -318,18 +457,20 @@ function toSignalFeedItem(
   const bias = killzone?.bias && killzone.bias !== 'NEUTRAL' ? killzone.bias : undefined;
   const updatedAt = new Date().toISOString();
   const { signalKey, conflictKey } = buildSignalIdentity(resolvedResult, strategyId, symbol, session, setupType);
-  const fingerprint = `${signalKey}|${lifecycleState}`;
 
   return {
     id: signalKey,
     signalKey,
-    fingerprint,
+    fingerprint: buildSignalFeedFingerprint({ signalKey, status: 'OPEN', lifecycleState }),
     symbol,
     strategyId,
     strategyName,
     direction: resolvedResult.direction,
     regime: resolvedResult.regime,
-    status: lifecycleState,
+    status: 'OPEN',
+    lifecycleState,
+    closeReason: undefined,
+    closeOutcome: undefined,
     session,
     setupType,
     bias,
@@ -341,6 +482,7 @@ function toSignalFeedItem(
     createdAt: updatedAt,
     updatedAt,
     conflictKey,
+    marketPrice: resolvedResult.price,
   };
 }
 
@@ -353,20 +495,25 @@ function upsertSignalFeed(prev: SignalFeedItem[], nextItem: SignalFeedItem) {
     if (item.signalKey === normalizedNext.signalKey) return false;
     const itemConflictKey = item.conflictKey || getSignalConflictKey(item);
     if (itemConflictKey !== nextConflictKey) return true;
-    return isTerminalSignalStatus(item.status);
+    return isClosedSignal(item);
   });
 
   const merged: SignalFeedItem = existing
     ? {
         ...existing,
         ...normalizedNext,
+        fingerprint: buildSignalFeedFingerprint(normalizedNext),
         conflictKey: nextConflictKey,
         createdAt: existing.createdAt,
         updatedAt: normalizedNext.updatedAt,
-        status: isTerminalSignalStatus(existing.status) ? existing.status : normalizedNext.status,
+        status: isClosedSignal(existing) ? 'CLOSED' : normalizedNext.status,
+        lifecycleState: isClosedSignal(existing) ? existing.lifecycleState : normalizedNext.lifecycleState,
+        closeReason: isClosedSignal(existing) ? existing.closeReason : normalizedNext.closeReason,
+        closeOutcome: isClosedSignal(existing) ? existing.closeOutcome : normalizedNext.closeOutcome,
       }
     : {
         ...normalizedNext,
+        fingerprint: buildSignalFeedFingerprint(normalizedNext),
         conflictKey: nextConflictKey,
       };
 
@@ -380,20 +527,83 @@ function normalizeSignalFeedItems(items: SignalFeedItem[]) {
     .reduce((acc, item) => upsertSignalFeed(acc, item), [] as SignalFeedItem[]);
 }
 
-function resolveSignalOutcome(item: SignalFeedItem, price: number): SignalFeedStatus {
-  if (!Number.isFinite(price) || price <= 0) return item.status;
-  if (item.status !== 'LIVE_SIGNAL' && item.status !== 'ACTIVE_TRADE') return item.status;
-  if (item.stop <= 0 || item.target <= 0) return item.status;
+function resolveSignalCloseOutcome(item: SignalFeedItem, price?: number) {
+  if (item.lifecycleState !== 'LIVE_SIGNAL' && item.lifecycleState !== 'ACTIVE_TRADE') {
+    return 'NOT_FILLED' as SignalCloseOutcome;
+  }
+
+  if (!Number.isFinite(price) || !price || price <= 0) return null;
+  const entryPrice = getSignalReferenceEntryPrice(item);
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return null;
 
   if (item.direction === 'LONG') {
-    if (price >= item.target) return 'TP_HIT';
-    if (price <= item.stop) return 'SL_HIT';
+    if (price > entryPrice) return 'PROFIT' as SignalCloseOutcome;
+    if (price < entryPrice) return 'LOSS' as SignalCloseOutcome;
+    return 'FLAT' as SignalCloseOutcome;
+  }
+
+  if (item.direction === 'SHORT') {
+    if (price < entryPrice) return 'PROFIT' as SignalCloseOutcome;
+    if (price > entryPrice) return 'LOSS' as SignalCloseOutcome;
+    return 'FLAT' as SignalCloseOutcome;
+  }
+
+  return 'FLAT' as SignalCloseOutcome;
+}
+
+function buildClosedSignalFeedItem(
+  item: SignalFeedItem,
+  closeReason: SignalCloseReason,
+  price?: number,
+  updatedAt: string = new Date().toISOString(),
+): SignalFeedItem | null {
+  const closeOutcome = closeReason === 'TP'
+    ? 'PROFIT'
+    : closeReason === 'SL'
+      ? 'LOSS'
+      : resolveSignalCloseOutcome(item, price);
+
+  if (!closeOutcome) return null;
+
+  const nextItem: SignalFeedItem = {
+    ...item,
+    status: 'CLOSED',
+    closeReason,
+    closeOutcome,
+    updatedAt,
+  };
+
+  return {
+    ...nextItem,
+    fingerprint: buildSignalFeedFingerprint(nextItem),
+  };
+}
+
+function resolveSignalOutcome(item: SignalFeedItem, price: number, updatedAt: string = new Date().toISOString()) {
+  if (item.status !== 'OPEN') return null;
+  if (item.lifecycleState !== 'LIVE_SIGNAL' && item.lifecycleState !== 'ACTIVE_TRADE') return null;
+  if (item.stop <= 0 || item.target <= 0) return null;
+
+  if (item.direction === 'LONG') {
+    if (price >= item.target) return buildClosedSignalFeedItem(item, 'TP', price, updatedAt);
+    if (price <= item.stop) return buildClosedSignalFeedItem(item, 'SL', price, updatedAt);
   }
   if (item.direction === 'SHORT') {
-    if (price <= item.target) return 'TP_HIT';
-    if (price >= item.stop) return 'SL_HIT';
+    if (price <= item.target) return buildClosedSignalFeedItem(item, 'TP', price, updatedAt);
+    if (price >= item.stop) return buildClosedSignalFeedItem(item, 'SL', price, updatedAt);
   }
-  return item.status;
+  return null;
+}
+
+function applySignalRollover(prev: SignalFeedItem[], nextItem: SignalFeedItem) {
+  if (nextItem.status !== 'OPEN') return prev;
+
+  return prev.map(item => {
+    if (item.status !== 'OPEN') return item;
+    if (item.signalKey === nextItem.signalKey) return item;
+    if (item.symbol !== nextItem.symbol || item.strategyId !== nextItem.strategyId) return item;
+    return buildClosedSignalFeedItem(item, 'SUPERSEDED', nextItem.marketPrice, nextItem.updatedAt) || item;
+  });
 }
 
 // Mobile tabs
@@ -716,15 +926,24 @@ export default function App() {
     if (!nextItem) return;
 
     const existing = signalFeedRef.current.find(item => item.signalKey === nextItem.signalKey);
-    const persistedItem = existing && isTerminalSignalStatus(existing.status)
-      ? { ...nextItem, status: existing.status, createdAt: existing.createdAt, updatedAt: existing.updatedAt }
+    const persistedItem = existing && isClosedSignal(existing)
+      ? {
+          ...nextItem,
+          status: 'CLOSED' as SignalRecordStatus,
+          lifecycleState: existing.lifecycleState,
+          closeReason: existing.closeReason,
+          closeOutcome: existing.closeOutcome,
+          createdAt: existing.createdAt,
+          updatedAt: existing.updatedAt,
+          fingerprint: existing.fingerprint,
+        }
       : nextItem;
 
-    setSignalFeed(prev => upsertSignalFeed(prev, persistedItem));
+    setSignalFeed(prev => upsertSignalFeed(applySignalRollover(prev, persistedItem), persistedItem));
     void upsertSignalFeedItemRemote(persistedItem)
-      .then(saved => {
-        if (saved) {
-          setSignalFeed(prev => upsertSignalFeed(prev, saved));
+      .then(savedItems => {
+        if (savedItems.length > 0) {
+          setSignalFeed(prev => normalizeSignalFeedItems([...savedItems, ...prev]));
         }
       })
       .catch(err => {
@@ -738,15 +957,18 @@ export default function App() {
     const updates: SignalFeedStatusUpdate[] = [];
     const next = signalFeed.map(item => {
       if (item.symbol !== symbol) return item;
-      const nextStatus = resolveSignalOutcome(item, currentPrice);
-      if (nextStatus === item.status) return item;
       const updatedAt = new Date().toISOString();
-      updates.push({ signalKey: item.signalKey, status: nextStatus, updatedAt });
-      return {
-        ...item,
-        status: nextStatus,
-        updatedAt,
-      };
+      const closedItem = resolveSignalOutcome(item, currentPrice, updatedAt);
+      if (!closedItem) return item;
+      updates.push({
+        signalKey: item.signalKey,
+        status: closedItem.status,
+        lifecycleState: closedItem.lifecycleState,
+        closeReason: closedItem.closeReason,
+        closeOutcome: closedItem.closeOutcome,
+        updatedAt: closedItem.updatedAt,
+      });
+      return closedItem;
     });
 
     if (updates.length === 0) return;
@@ -1058,7 +1280,7 @@ export default function App() {
         )}
       </div>
       <div className="text-[10px] text-[#787B86] mb-3">
-        目前會依照最新價格自動標記 TP / SL，並同步保存到後端。
+        目前會把 open signal 自動更新成 TP / SL / SUPERSEDED / TIMEOUT，並同步保存到後端。
       </div>
       {items.length === 0 ? (
         <div className="text-xs text-[#787B86] text-center py-3">尚無歷史訊號</div>
@@ -1078,8 +1300,8 @@ export default function App() {
                 <div>
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-bold text-[#D1D4DC]">{item.symbol}</span>
-                    <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${getSignalStatusTone(item.status)}`}>
-                      {formatSignalStatus(item.status)}
+                    <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${getSignalStatusTone(item)}`}>
+                      {formatSignalStatus(item)}
                     </span>
                     {item.direction !== 'NEUTRAL' && (
                       <span className={`text-[10px] font-bold ${item.direction === 'LONG' ? 'text-[#089981]' : 'text-[#F23645]'}`}>
