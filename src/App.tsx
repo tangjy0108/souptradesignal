@@ -13,13 +13,12 @@ import { calculateSMA, calculateRSI, calculateMACD, calculateBollingerBands } fr
 import { runStrategy, StrategyResult } from './lib/strategy';
 import { formatPrice, formatPriceString, getDecimals } from './lib/utils';
 import { useFundingRate } from './hooks/useFundingRate';
-import BacktestPanel from './components/BacktestPanel';
 import { useAlerts } from './hooks/useAlerts';
 import { useMultiTimeframe } from './hooks/useMultiTimeframe';
 import { detectHarmonics, HarmonicPattern } from './lib/harmonics';
 import { detectSNRFVG, SNRFVGResult } from './lib/snrFvg';
 
-// ─── 圖表參數 Preset（由 BacktestPanel 的「載入至圖表」寫入）───
+// ─── 圖表參數 Preset ───
 const CHART_PRESET_KEY = 'qv_chart_preset';
 interface ChartPreset {
   name: string; strategyId: string;
@@ -104,6 +103,7 @@ type SignalRecordStatus = 'OPEN' | 'CLOSED';
 type SignalCloseReason = 'TP' | 'SL' | 'SUPERSEDED' | 'TIMEOUT';
 type SignalCloseOutcome = 'PROFIT' | 'LOSS' | 'FLAT' | 'NOT_FILLED';
 type SignalFeedBadgeValue = SignalLifecycleState | SignalFeedItem;
+type RadarConfidence = 'LOW' | 'MEDIUM' | 'HIGH';
 
 type SignalFeedItem = {
   id: string;
@@ -133,6 +133,221 @@ type SignalFeedItem = {
 };
 
 type SignalFeedStatusUpdate = Pick<SignalFeedItem, 'signalKey' | 'status' | 'lifecycleState' | 'closeReason' | 'closeOutcome' | 'updatedAt'>;
+type RadarItem = {
+  symbol: string;
+  topSignal: SignalFeedItem;
+  estWinRate: number;
+  sampleSize: number;
+  wins: number;
+  losses: number;
+  confidence: RadarConfidence;
+  score: number;
+  freshnessHours: number;
+  alternativeCount: number;
+  historyBasis: 'EXACT' | 'SETUP' | 'STRATEGY_DIRECTION' | 'STRATEGY';
+};
+type ReviewBreakdownRow = {
+  key: string;
+  label: string;
+  total: number;
+  open: number;
+  closed: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  avgPlannedR: number | null;
+};
+type ReviewSummary = {
+  totalSignals: number;
+  openSignals: number;
+  closedSignals: number;
+  decisiveSignals: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  avgPlannedR: number | null;
+  avgEstimatedWinRate: number | null;
+  stageCounts: Record<SignalLifecycleState, number>;
+  closeReasonCounts: Record<SignalCloseReason, number>;
+};
+
+const STRATEGY_SHORT_LABELS: Record<string, string> = {
+  ms_ob: 'MS+OB',
+  structural_reversal: 'PRZ',
+  smc_session: 'SMC',
+  ict_killzone_opt3: 'KZ',
+  snr_fvg: 'SNR+FVG',
+  harmonics: 'HARM',
+};
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function formatUnderscoreLabel(value?: string) {
+  if (!value) return '—';
+  return value.split('_').join(' ');
+}
+
+function formatRelativeMinutes(input?: string) {
+  if (!input) return '—';
+  const diffMs = Date.now() - new Date(input).getTime();
+  if (!Number.isFinite(diffMs)) return '—';
+  const mins = Math.max(0, Math.round(diffMs / 60000));
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+function getStrategyShortLabel(strategyId: string) {
+  return STRATEGY_SHORT_LABELS[strategyId] || strategyId.toUpperCase();
+}
+
+function getRadarConfidence(sampleSize: number): RadarConfidence {
+  if (sampleSize >= 40) return 'HIGH';
+  if (sampleSize >= 15) return 'MEDIUM';
+  return 'LOW';
+}
+
+function getConfidenceTone(confidence: RadarConfidence) {
+  if (confidence === 'HIGH') return 'bg-[#089981]/12 text-[#089981]';
+  if (confidence === 'MEDIUM') return 'bg-[#FFC107]/12 text-[#FFC107]';
+  return 'bg-[#787B86]/12 text-[#9CA3AF]';
+}
+
+function isDecisiveClosedSignal(item: SignalFeedItem) {
+  return item.status === 'CLOSED' && (item.closeOutcome === 'PROFIT' || item.closeOutcome === 'LOSS');
+}
+
+function getFreshnessHours(updatedAt: string) {
+  const diff = Date.now() - new Date(updatedAt).getTime();
+  if (!Number.isFinite(diff)) return 999;
+  return Math.max(0, diff / (60 * 60 * 1000));
+}
+
+function buildRadarHistoryCandidates(closedItems: SignalFeedItem[], signal: SignalFeedItem) {
+  const setupType = signal.setupType || '';
+  const session = signal.session || '';
+
+  const exact = closedItems.filter(item =>
+    item.strategyId === signal.strategyId &&
+    item.direction === signal.direction &&
+    (item.setupType || '') === setupType &&
+    (item.session || '') === session
+  );
+  if (exact.length >= 8) {
+    return { basis: 'EXACT' as const, items: exact };
+  }
+
+  const sameSetup = closedItems.filter(item =>
+    item.strategyId === signal.strategyId &&
+    item.direction === signal.direction &&
+    (item.setupType || '') === setupType
+  );
+  if (sameSetup.length >= 8) {
+    return { basis: 'SETUP' as const, items: sameSetup };
+  }
+
+  const sameStrategyDirection = closedItems.filter(item =>
+    item.strategyId === signal.strategyId &&
+    item.direction === signal.direction
+  );
+  if (sameStrategyDirection.length >= 8) {
+    return { basis: 'STRATEGY_DIRECTION' as const, items: sameStrategyDirection };
+  }
+
+  const sameStrategy = closedItems.filter(item => item.strategyId === signal.strategyId);
+  return { basis: 'STRATEGY' as const, items: sameStrategy };
+}
+
+function getRadarOpportunityScore(
+  signal: SignalFeedItem,
+  estWinRate: number,
+  sampleSize: number,
+  freshnessHours: number,
+  isFavorite: boolean,
+) {
+  const stageScores: Record<SignalLifecycleState, number> = {
+    LIVE_SIGNAL: 95,
+    ACTIVE_TRADE: 82,
+    WAITING_RETEST: 76,
+    WAITING_CONFIRM: 64,
+  };
+  const stageScore = stageScores[signal.lifecycleState] || 50;
+  const rrScore = clamp((signal.rr / 3) * 100, 0, 100);
+  const confidenceScore = clamp((sampleSize / 40) * 100, 0, 100);
+  const freshnessScore = clamp(100 - freshnessHours * 4, 20, 100);
+  const favoriteBonus = isFavorite ? 4 : 0;
+
+  return clamp(
+    estWinRate * 0.35 +
+    stageScore * 0.25 +
+    rrScore * 0.15 +
+    confidenceScore * 0.15 +
+    freshnessScore * 0.10 +
+    favoriteBonus,
+    0,
+    99,
+  );
+}
+
+function buildReviewBreakdown(
+  items: SignalFeedItem[],
+  getKey: (item: SignalFeedItem) => string,
+  getLabel: (item: SignalFeedItem) => string,
+) {
+  const groups = new Map<string, ReviewBreakdownRow & { plannedRTotal: number; plannedRCount: number }>();
+
+  items.forEach(item => {
+    const key = getKey(item);
+    if (!key) return;
+    const row = groups.get(key) || {
+      key,
+      label: getLabel(item),
+      total: 0,
+      open: 0,
+      closed: 0,
+      wins: 0,
+      losses: 0,
+      winRate: null,
+      avgPlannedR: null,
+      plannedRTotal: 0,
+      plannedRCount: 0,
+    };
+
+    row.total += 1;
+    if (item.status === 'OPEN') row.open += 1;
+    if (item.status === 'CLOSED') row.closed += 1;
+    if (item.closeOutcome === 'PROFIT') row.wins += 1;
+    if (item.closeOutcome === 'LOSS') row.losses += 1;
+    if (item.status === 'CLOSED' && Number.isFinite(item.rr) && item.rr > 0) {
+      row.plannedRTotal += item.rr;
+      row.plannedRCount += 1;
+    }
+
+    groups.set(key, row);
+  });
+
+  return Array.from(groups.values())
+    .map(row => ({
+      key: row.key,
+      label: row.label,
+      total: row.total,
+      open: row.open,
+      closed: row.closed,
+      wins: row.wins,
+      losses: row.losses,
+      winRate: row.wins + row.losses > 0 ? (row.wins / (row.wins + row.losses)) * 100 : null,
+      avgPlannedR: row.plannedRCount > 0 ? row.plannedRTotal / row.plannedRCount : null,
+    }))
+    .sort((a, b) =>
+      (b.winRate ?? -1) - (a.winRate ?? -1) ||
+      b.wins - a.wins ||
+      b.total - a.total
+    );
+}
 
 function getSignalDateKey(input?: string | number | Date) {
   const date = input instanceof Date ? input : new Date(input || Date.now());
@@ -607,7 +822,7 @@ function applySignalRollover(prev: SignalFeedItem[], nextItem: SignalFeedItem) {
 }
 
 // Mobile tabs
-type MobileTab = 'chart' | 'signal' | 'alerts' | 'backtest';
+type MobileTab = 'chart' | 'signal' | 'radar' | 'review';
 
 // ── Volume spike detection ──
 function detectVolumeSpikes(data: any[]): Set<number> {
@@ -990,6 +1205,137 @@ export default function App() {
 
   const currentResultState = strategyResult ? getResultLifecycleState(strategyResult) : null;
 
+  const radarItems = useMemo<RadarItem[]>(() => {
+    const openSignals = signalFeed.filter(item => item.status === 'OPEN');
+    const closedSignals = signalFeed.filter(isDecisiveClosedSignal);
+    const candidates = openSignals.map(item => {
+      const history = buildRadarHistoryCandidates(closedSignals, item);
+      const wins = history.items.filter(entry => entry.closeOutcome === 'PROFIT').length;
+      const losses = history.items.filter(entry => entry.closeOutcome === 'LOSS').length;
+      const sampleSize = wins + losses;
+      const estWinRate = ((wins + 3) / (sampleSize + 6)) * 100;
+      const freshnessHours = getFreshnessHours(item.updatedAt);
+      return {
+        symbol: item.symbol,
+        topSignal: item,
+        estWinRate,
+        sampleSize,
+        wins,
+        losses,
+        confidence: getRadarConfidence(sampleSize),
+        score: getRadarOpportunityScore(item, estWinRate, sampleSize, freshnessHours, favorites.includes(item.symbol)),
+        freshnessHours,
+        alternativeCount: 0,
+        historyBasis: history.basis,
+      };
+    });
+
+    const bySymbol = new Map<string, RadarItem>();
+    candidates.forEach(candidate => {
+      const existing = bySymbol.get(candidate.symbol);
+      if (!existing) {
+        bySymbol.set(candidate.symbol, candidate);
+        return;
+      }
+
+      if (candidate.score > existing.score) {
+        bySymbol.set(candidate.symbol, { ...candidate, alternativeCount: existing.alternativeCount + 1 });
+        return;
+      }
+
+      bySymbol.set(candidate.symbol, { ...existing, alternativeCount: existing.alternativeCount + 1 });
+    });
+
+    return Array.from(bySymbol.values()).sort((a, b) => b.score - a.score || b.estWinRate - a.estWinRate);
+  }, [signalFeed, favorites]);
+
+  const reviewSummary = useMemo<ReviewSummary>(() => {
+    const stageCounts: Record<SignalLifecycleState, number> = {
+      WAITING_CONFIRM: 0,
+      WAITING_RETEST: 0,
+      ACTIVE_TRADE: 0,
+      LIVE_SIGNAL: 0,
+    };
+    const closeReasonCounts: Record<SignalCloseReason, number> = {
+      TP: 0,
+      SL: 0,
+      SUPERSEDED: 0,
+      TIMEOUT: 0,
+    };
+
+    let openSignals = 0;
+    let closedSignals = 0;
+    let decisiveSignals = 0;
+    let wins = 0;
+    let losses = 0;
+    let plannedRTotal = 0;
+    let plannedRCount = 0;
+
+    signalFeed.forEach(item => {
+      if (item.status === 'OPEN') {
+        openSignals += 1;
+        stageCounts[item.lifecycleState] += 1;
+      } else {
+        closedSignals += 1;
+        if (item.closeReason) closeReasonCounts[item.closeReason] += 1;
+        if (item.closeOutcome === 'PROFIT') wins += 1;
+        if (item.closeOutcome === 'LOSS') losses += 1;
+        if (item.closeOutcome === 'PROFIT' || item.closeOutcome === 'LOSS') decisiveSignals += 1;
+        if (Number.isFinite(item.rr) && item.rr > 0) {
+          plannedRTotal += item.rr;
+          plannedRCount += 1;
+        }
+      }
+    });
+
+    return {
+      totalSignals: signalFeed.length,
+      openSignals,
+      closedSignals,
+      decisiveSignals,
+      wins,
+      losses,
+      winRate: wins + losses > 0 ? (wins / (wins + losses)) * 100 : null,
+      avgPlannedR: plannedRCount > 0 ? plannedRTotal / plannedRCount : null,
+      avgEstimatedWinRate: radarItems.length > 0
+        ? radarItems.reduce((sum, item) => sum + item.estWinRate, 0) / radarItems.length
+        : null,
+      stageCounts,
+      closeReasonCounts,
+    };
+  }, [signalFeed, radarItems]);
+
+  const strategyReviewRows = useMemo(
+    () => buildReviewBreakdown(signalFeed, item => item.strategyId, item => item.strategyName || getStrategyShortLabel(item.strategyId)),
+    [signalFeed],
+  );
+
+  const setupReviewRows = useMemo(
+    () => buildReviewBreakdown(
+      signalFeed,
+      item => item.setupType || item.regime || item.strategyId,
+      item => formatUnderscoreLabel(item.setupType || item.regime || getStrategyShortLabel(item.strategyId)),
+    ),
+    [signalFeed],
+  );
+
+  const sessionReviewRows = useMemo(
+    () => buildReviewBreakdown(
+      signalFeed.filter(item => Boolean(item.session)),
+      item => item.session || 'Session',
+      item => item.session || 'Session',
+    ),
+    [signalFeed],
+  );
+
+  const recentClosedSignals = useMemo(
+    () => signalFeed
+      .filter(item => item.status === 'CLOSED')
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+      .slice(0, 12),
+    [signalFeed],
+  );
+
   const handleRunStrategy = async () => {
     setIsStrategyRunning(true);
     setHarmonicPatterns([]);
@@ -1361,6 +1707,233 @@ export default function App() {
           ))}
         </div>
       )}
+    </div>
+  ));
+
+  const RadarPanel = React.memo(() => (
+    <div className="p-4 space-y-4">
+      <div className="space-y-1">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-[10px] font-bold text-[#787B86] uppercase tracking-widest">Market Radar</div>
+          <span className="text-[10px] text-[#787B86]">{radarItems.length} 個機會</span>
+        </div>
+        <div className="text-[11px] text-[#787B86] leading-relaxed">
+          分數綜合了預估勝率、訊號階段、R/R、樣本數與新鮮度，讓你先看最值得打開的幣。
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        {[
+          { label: 'Open', value: reviewSummary.openSignals.toString(), tone: 'text-[#D1D4DC]' },
+          { label: 'Avg Est.', value: reviewSummary.avgEstimatedWinRate !== null ? `${reviewSummary.avgEstimatedWinRate.toFixed(0)}%` : '—', tone: 'text-[#2962FF]' },
+          { label: 'Best Score', value: radarItems[0] ? radarItems[0].score.toFixed(0) : '—', tone: 'text-[#089981]' },
+        ].map(card => (
+          <div key={card.label} className="rounded-xl border border-[#2A2E39] bg-[#1E222D] p-3">
+            <div className="text-[10px] text-[#787B86] uppercase tracking-wide">{card.label}</div>
+            <div className={`mt-1 text-lg font-bold ${card.tone}`}>{card.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {radarItems.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-[#2A2E39] bg-[#131722] p-6 text-center text-sm text-[#787B86]">
+          目前沒有 open signal，等下一輪掃描進來後這裡就會開始排序。
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {radarItems.map(({ symbol: radarSymbol, topSignal, estWinRate, sampleSize, confidence, score, alternativeCount, historyBasis }) => {
+            const basisLabel = historyBasis === 'EXACT'
+              ? 'Exact'
+              : historyBasis === 'SETUP'
+                ? 'Setup'
+                : historyBasis === 'STRATEGY_DIRECTION'
+                  ? 'Strat+Dir'
+                  : 'Strategy';
+            return (
+              <button
+                key={radarSymbol}
+                onClick={() => selectSymbol(radarSymbol, true)}
+                className={`w-full text-left rounded-2xl border p-3 transition-colors ${
+                  radarSymbol === symbol
+                    ? 'border-[#2962FF]/40 bg-[#2962FF]/8'
+                    : 'border-[#2A2E39] bg-[#1E222D] hover:bg-[#222734]'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-bold text-[#D1D4DC]">{radarSymbol}</span>
+                      {favorites.includes(radarSymbol) && <Star className="w-3.5 h-3.5 fill-[#FFC107] text-[#FFC107]" />}
+                      <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${getSignalStatusTone(topSignal)}`}>
+                        {formatSignalStatus(topSignal)}
+                      </span>
+                      <span className={`text-[10px] font-bold ${topSignal.direction === 'LONG' ? 'text-[#089981]' : 'text-[#F23645]'}`}>
+                        {topSignal.direction}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-[#787B86]">
+                      {getStrategyShortLabel(topSignal.strategyId)} · {topSignal.strategyName}
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="text-[10px] text-[#787B86]">Score</div>
+                    <div className="text-lg font-bold text-[#2962FF]">{score.toFixed(0)}</div>
+                  </div>
+                </div>
+
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {topSignal.session && <span className="px-1.5 py-0.5 rounded bg-[#0F1117] text-[10px] text-[#9CA3AF]">{topSignal.session}</span>}
+                  {topSignal.setupType && <span className="px-1.5 py-0.5 rounded bg-[#0F1117] text-[10px] text-[#D1D4DC]">{formatUnderscoreLabel(topSignal.setupType)}</span>}
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] ${getConfidenceTone(confidence)}`}>{confidence}</span>
+                  {alternativeCount > 0 && <span className="px-1.5 py-0.5 rounded bg-[#2962FF]/10 text-[10px] text-[#7EA6FF]">+{alternativeCount} other</span>}
+                </div>
+
+                <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
+                  <div className="rounded-lg bg-[#0F1117] px-2.5 py-2">
+                    <div className="text-[#787B86]">Est. Win</div>
+                    <div className="mt-1 text-sm font-bold text-[#D1D4DC]">{estWinRate.toFixed(0)}%</div>
+                  </div>
+                  <div className="rounded-lg bg-[#0F1117] px-2.5 py-2">
+                    <div className="text-[#787B86]">Sample</div>
+                    <div className="mt-1 text-sm font-bold text-[#D1D4DC]">n={sampleSize}</div>
+                  </div>
+                  <div className="rounded-lg bg-[#0F1117] px-2.5 py-2">
+                    <div className="text-[#787B86]">Planned R/R</div>
+                    <div className="mt-1 text-sm font-bold text-[#D1D4DC]">{topSignal.rr > 0 ? topSignal.rr.toFixed(2) : '—'}</div>
+                  </div>
+                  <div className="rounded-lg bg-[#0F1117] px-2.5 py-2">
+                    <div className="text-[#787B86]">Basis</div>
+                    <div className="mt-1 text-sm font-bold text-[#D1D4DC]">{basisLabel}</div>
+                  </div>
+                </div>
+
+                <div className="mt-2 text-[10px] text-[#787B86]">更新於 {formatRelativeMinutes(topSignal.updatedAt)}</div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  ));
+
+  const ReviewPanel = React.memo(() => (
+    <div className="p-4 space-y-4">
+      <div className="space-y-1">
+        <div className="text-[10px] font-bold text-[#787B86] uppercase tracking-widest">Signal Review</div>
+        <div className="text-[11px] text-[#787B86] leading-relaxed">
+          這頁只看真實 signal feed 的結果，用來回顧哪個策略、setup 和 session 最近比較有 edge。
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        {[
+          { label: 'Closed', value: reviewSummary.closedSignals.toString(), tone: 'text-[#D1D4DC]' },
+          { label: 'Open', value: reviewSummary.openSignals.toString(), tone: 'text-[#2962FF]' },
+          { label: 'Win Rate', value: reviewSummary.winRate !== null ? `${reviewSummary.winRate.toFixed(0)}%` : '—', tone: 'text-[#089981]' },
+          { label: 'Avg Plan R', value: reviewSummary.avgPlannedR !== null ? reviewSummary.avgPlannedR.toFixed(2) : '—', tone: 'text-[#FFC107]' },
+        ].map(card => (
+          <div key={card.label} className="rounded-xl border border-[#2A2E39] bg-[#1E222D] p-3">
+            <div className="text-[10px] text-[#787B86] uppercase tracking-wide">{card.label}</div>
+            <div className={`mt-1 text-lg font-bold ${card.tone}`}>{card.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="rounded-2xl border border-[#2A2E39] bg-[#1E222D] p-3 space-y-3">
+        <div className="text-[10px] font-bold text-[#787B86] uppercase tracking-widest">Open State</div>
+        <div className="flex flex-wrap gap-2">
+          {(
+            [
+              ['WAITING_CONFIRM', reviewSummary.stageCounts.WAITING_CONFIRM],
+              ['WAITING_RETEST', reviewSummary.stageCounts.WAITING_RETEST],
+              ['ACTIVE_TRADE', reviewSummary.stageCounts.ACTIVE_TRADE],
+              ['LIVE_SIGNAL', reviewSummary.stageCounts.LIVE_SIGNAL],
+            ] as const
+          ).map(([label, count]) => (
+            <span key={label} className={`px-2 py-1 rounded-full border text-[10px] font-bold ${getSignalStatusTone(label)}`}>
+              {formatUnderscoreLabel(label)} · {count}
+            </span>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {(
+            [
+              ['TP', reviewSummary.closeReasonCounts.TP],
+              ['SL', reviewSummary.closeReasonCounts.SL],
+              ['SUPERSEDED', reviewSummary.closeReasonCounts.SUPERSEDED],
+              ['TIMEOUT', reviewSummary.closeReasonCounts.TIMEOUT],
+            ] as const
+          ).map(([label, count]) => (
+            <span key={label} className="px-2 py-1 rounded-full bg-[#0F1117] text-[10px] text-[#9CA3AF]">
+              {formatUnderscoreLabel(label)} · {count}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {[
+        { title: 'Strategy Edge', rows: strategyReviewRows.slice(0, 6) },
+        { title: 'Setup Edge', rows: setupReviewRows.slice(0, 6) },
+        { title: 'Session Edge', rows: sessionReviewRows.slice(0, 4) },
+      ].map(section => (
+        <div key={section.title} className="rounded-2xl border border-[#2A2E39] bg-[#1E222D] p-3 space-y-3">
+          <div className="text-[10px] font-bold text-[#787B86] uppercase tracking-widest">{section.title}</div>
+          {section.rows.length === 0 ? (
+            <div className="text-xs text-[#787B86]">尚無足夠資料</div>
+          ) : (
+            <div className="space-y-2">
+              {section.rows.map(row => (
+                <div key={row.key} className="rounded-xl bg-[#0F1117] px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm font-medium text-[#D1D4DC] truncate">{row.label}</div>
+                    <div className="text-[11px] text-[#787B86]">{row.total} signals</div>
+                  </div>
+                  <div className="mt-1 grid grid-cols-3 gap-2 text-[11px]">
+                    <div><span className="text-[#787B86]">WR</span> <span className="text-[#D1D4DC] font-medium">{row.winRate !== null ? `${row.winRate.toFixed(0)}%` : '—'}</span></div>
+                    <div><span className="text-[#787B86]">W/L</span> <span className="text-[#D1D4DC] font-medium">{row.wins}/{row.losses}</span></div>
+                    <div><span className="text-[#787B86]">Avg R</span> <span className="text-[#D1D4DC] font-medium">{row.avgPlannedR !== null ? row.avgPlannedR.toFixed(2) : '—'}</span></div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+
+      <div className="rounded-2xl border border-[#2A2E39] bg-[#1E222D] p-3 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-[10px] font-bold text-[#787B86] uppercase tracking-widest">Recent Outcomes</div>
+          <div className="text-[10px] text-[#787B86]">最近 {recentClosedSignals.length} 筆</div>
+        </div>
+        {recentClosedSignals.length === 0 ? (
+          <div className="text-xs text-[#787B86]">尚無已結束 signal</div>
+        ) : (
+          <div className="space-y-2">
+            {recentClosedSignals.map(item => (
+              <button
+                key={item.signalKey}
+                onClick={() => selectSymbol(item.symbol, true)}
+                className="w-full text-left rounded-xl bg-[#0F1117] px-3 py-2 hover:bg-[#151A24] transition-colors"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 flex-wrap min-w-0">
+                    <span className="text-sm font-bold text-[#D1D4DC]">{item.symbol}</span>
+                    <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${getSignalStatusTone(item)}`}>
+                      {formatSignalStatus(item)}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-[#787B86] shrink-0">{formatRelativeMinutes(item.updatedAt)}</span>
+                </div>
+                <div className="mt-1 text-[11px] text-[#787B86] truncate">
+                  {getStrategyShortLabel(item.strategyId)} · {item.strategyName}
+                  {item.setupType ? ` · ${formatUnderscoreLabel(item.setupType)}` : ''}
+                  {item.session ? ` · ${item.session}` : ''}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   ));
 
@@ -1755,7 +2328,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-2 lg:hidden">
             {/* Mobile: bell icon shows alert count */}
-            <button onClick={() => setMobileTab('alerts')}
+            <button onClick={() => setMobileTab('signal')}
               className="relative p-2 text-[#787B86] hover:text-[#D1D4DC] hover:bg-[#1E222D] rounded-lg transition-colors">
               <Bell className="w-5 h-5" />
               {alerts.filter(a => a.symbol === symbol && !a.triggered).length > 0 && (
@@ -2343,16 +2916,14 @@ export default function App() {
           {showAlertPanel && <AlertsPanel symbol={symbol} currentPrice={currentPrice} alerts={alerts} notifPermission={notifPermission} requestPermission={requestPermission} addAlert={addAlert} removeAlert={removeAlert} clearTriggered={clearTriggered} />}
           <RightPanelContent />
         </div>
-
-        {/* ── Mobile: Signal / Alerts / Backtest tabs ── */}
+        {/* ── Mobile: Signal / Radar / Review tabs ── */}
         {mobileTab !== 'chart' && (
           <div className="flex-1 lg:hidden bg-[#131722] overflow-y-auto custom-scrollbar pb-20">
             {mobileTab === 'signal' && <RightPanelContent />}
-            {mobileTab === 'alerts' && <AlertsPanel symbol={symbol} currentPrice={currentPrice} alerts={alerts} notifPermission={notifPermission} requestPermission={requestPermission} addAlert={addAlert} removeAlert={removeAlert} clearTriggered={clearTriggered} />}
-            {mobileTab === 'backtest' && <BacktestPanel />}
+            {mobileTab === 'radar' && <RadarPanel />}
+            {mobileTab === 'review' && <ReviewPanel />}
           </div>
         )}
-
 
       </div>
 
@@ -2360,18 +2931,18 @@ export default function App() {
       <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-[#131722] border-t border-[#2A2E39] flex items-center z-30"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
         {([
-          { key: 'chart',    label: '圖表',  Icon: Activity   },
-          { key: 'signal',   label: '信號',  Icon: TrendingUp },
-          { key: 'alerts',   label: '警報',  Icon: Bell       },
-          { key: 'backtest', label: '回測',  Icon: BarChart2  },
+          { key: 'chart',  label: '圖表', Icon: Activity   },
+          { key: 'signal', label: '信號', Icon: TrendingUp },
+          { key: 'radar',  label: '雷達', Icon: LayoutGrid },
+          { key: 'review', label: '回顧', Icon: BarChart2  },
         ] as { key: MobileTab; label: string; Icon: any }[]).map(({ key, label, Icon }) => (
           <button key={key} onClick={() => setMobileTab(key)}
             className={`flex-1 flex flex-col items-center justify-center py-3 gap-0.5 transition-colors relative ${mobileTab === key ? 'text-[#2962FF]' : 'text-[#787B86]'}`}>
             <Icon className="w-5 h-5" />
             <span className="text-[10px] font-medium">{label}</span>
-            {key === 'alerts' && alerts.filter(a => a.symbol === symbol && !a.triggered).length > 0 && (
-              <span className="absolute top-2 right-1/4 w-3.5 h-3.5 bg-[#2962FF] text-white text-[8px] rounded-full flex items-center justify-center font-bold">
-                {alerts.filter(a => a.symbol === symbol && !a.triggered).length}
+            {key === 'radar' && reviewSummary.openSignals > 0 && (
+              <span className="absolute top-2 right-1/4 min-w-[14px] h-3.5 px-1 bg-[#2962FF] text-white text-[8px] rounded-full flex items-center justify-center font-bold">
+                {reviewSummary.openSignals}
               </span>
             )}
           </button>
