@@ -122,23 +122,78 @@ type SignalFeedItem = {
   rr: number;
   createdAt: string;
   updatedAt: string;
+  conflictKey?: string;
 };
 
 type SignalFeedStatusUpdate = Pick<SignalFeedItem, 'signalKey' | 'status' | 'updatedAt'>;
+
+function getSignalDateKey(input?: string | number | Date) {
+  const date = input instanceof Date ? input : new Date(input || Date.now());
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const map = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${map.year || '0000'}-${map.month || '00'}-${map.day || '00'}`;
+}
+
+function getSignalConflictKey(item: Partial<SignalFeedItem>) {
+  const strategyId = item.strategyId || 'unknown';
+  const symbol = item.symbol || 'UNKNOWN';
+  const dateKey = getSignalDateKey(item.createdAt || item.updatedAt);
+
+  if (strategyId === 'ict_killzone_opt3') {
+    return [strategyId, symbol, item.session || 'Off-Hours', dateKey].join('|');
+  }
+
+  if (strategyId === 'smc_session') {
+    return [strategyId, symbol, item.session || 'Session', dateKey].join('|');
+  }
+
+  return [strategyId, symbol, dateKey].join('|');
+}
+
+function normalizeSignalFeedItem(item: any): SignalFeedItem {
+  const strategyId = item?.strategyId || item?.strategy_id || 'unknown';
+  const strategyName = item?.strategyName || item?.strategy_name || strategyId;
+  const createdAt = item?.createdAt || item?.created_at || item?.updatedAt || item?.updated_at || new Date().toISOString();
+  const updatedAt = item?.updatedAt || item?.updated_at || createdAt;
+  const signalKey = item?.signalKey || item?.signal_key || item?.fingerprint || item?.id || [strategyId, item?.symbol || 'signal', getSignalDateKey(createdAt), item?.regime || 'UNKNOWN'].join('|');
+
+  return {
+    ...item,
+    id: signalKey,
+    signalKey,
+    fingerprint: item?.fingerprint || signalKey,
+    strategyId,
+    strategyName,
+    direction: item?.direction || 'NEUTRAL',
+    regime: item?.regime || '',
+    status: item?.status || 'LIVE_SIGNAL',
+    entryLow: Number(item?.entryLow ?? item?.entry_low) || 0,
+    entryHigh: Number(item?.entryHigh ?? item?.entry_high) || 0,
+    stop: Number(item?.stop) || 0,
+    target: Number(item?.target) || 0,
+    rr: Number(item?.rr) || 0,
+    createdAt,
+    updatedAt,
+    conflictKey: item?.conflictKey || getSignalConflictKey({
+      strategyId,
+      symbol: item?.symbol,
+      session: item?.session,
+      createdAt,
+      updatedAt,
+    }),
+  };
+}
 
 function readSignalFeed(): SignalFeedItem[] {
   try {
     const raw = JSON.parse(localStorage.getItem(SIGNAL_FEED_KEY) || '[]');
     if (!Array.isArray(raw)) return [];
-    return raw.map((item: any) => {
-      const signalKey = item?.signalKey || item?.signal_key || item?.fingerprint || item?.id || `${item?.symbol || 'signal'}-${item?.createdAt || Date.now()}`;
-      return {
-        ...item,
-        id: signalKey,
-        signalKey,
-        fingerprint: item?.fingerprint || signalKey,
-      };
-    });
+    return normalizeSignalFeedItems(raw);
   } catch {
     return [];
   }
@@ -172,7 +227,7 @@ async function upsertSignalFeedItemRemote(item: SignalFeedItem): Promise<SignalF
 }
 
 async function upsertSignalFeedItemsRemote(items: SignalFeedItem[]): Promise<SignalFeedItem[]> {
-  const json = await requestSignalFeedApi('POST', { signals: items });
+  const json = await requestSignalFeedApi('POST', { signals: items, notify: false });
   return Array.isArray(json.items) ? json.items : [];
 }
 
@@ -209,16 +264,52 @@ function formatSignalStatus(status: SignalFeedStatus) {
   return status.split('_').join(' ');
 }
 
+function buildSignalIdentity(
+  result: NonNullable<StrategyResult>,
+  strategyId: string,
+  symbol: string,
+  session?: string,
+  setupType?: string,
+) {
+  const dateKey = getSignalDateKey(result.time || new Date().toISOString());
+
+  if (strategyId === 'ict_killzone_opt3') {
+    const conflictKey = [strategyId, symbol, session || 'Off-Hours', dateKey].join('|');
+    const sweepLevelKey = Number.isFinite(result.killzoneDetails?.sweepLevel)
+      ? result.killzoneDetails!.sweepLevel.toFixed(6)
+      : '0';
+
+    return {
+      conflictKey,
+      signalKey: [conflictKey, setupType || result.regime, sweepLevelKey].join('|'),
+    };
+  }
+
+  if (strategyId === 'smc_session') {
+    const conflictKey = [strategyId, symbol, session || 'Session', dateKey].join('|');
+    return {
+      conflictKey,
+      signalKey: [conflictKey, result.regime, result.direction].join('|'),
+    };
+  }
+
+  const conflictKey = [strategyId, symbol, dateKey].join('|');
+  return {
+    conflictKey,
+    signalKey: [conflictKey, result.regime, result.direction].join('|'),
+  };
+}
+
 function toSignalFeedItem(
-  result: StrategyResult,
+  result: StrategyResult | null,
   strategyId: string,
   strategyName: string,
   symbol: string,
 ): SignalFeedItem | null {
   const lifecycleState = getResultLifecycleState(result);
-  if (!lifecycleState) return null;
+  if (!lifecycleState || !result) return null;
 
-  const resolvedResult = result!;
+  const resolvedResult: NonNullable<StrategyResult> = result;
   const killzone = resolvedResult.killzoneDetails;
   const session = killzone?.currentSession && killzone.currentSession !== 'Off-Hours'
     ? killzone.currentSession
@@ -226,20 +317,7 @@ function toSignalFeedItem(
   const setupType = killzone?.setupType && killzone.setupType !== 'NONE' ? killzone.setupType : undefined;
   const bias = killzone?.bias && killzone.bias !== 'NEUTRAL' ? killzone.bias : undefined;
   const updatedAt = new Date().toISOString();
-  const precision = (value: number) => Number.isFinite(value) ? value.toFixed(6) : '0';
-  const signalKey = [
-    strategyId,
-    symbol,
-    resolvedResult.regime,
-    resolvedResult.direction,
-    precision(resolvedResult.entry_low),
-    precision(resolvedResult.entry_high),
-    precision(resolvedResult.stop),
-    precision(resolvedResult.target),
-    precision(killzone?.sweepLevel || 0),
-    precision(killzone?.mssLevel || 0),
-    updatedAt.slice(0, 10),
-  ].join('|');
+  const { signalKey, conflictKey } = buildSignalIdentity(resolvedResult, strategyId, symbol, session, setupType);
   const fingerprint = `${signalKey}|${lifecycleState}`;
 
   return {
@@ -262,23 +340,44 @@ function toSignalFeedItem(
     rr: resolvedResult.rr,
     createdAt: updatedAt,
     updatedAt,
+    conflictKey,
   };
 }
 
 function upsertSignalFeed(prev: SignalFeedItem[], nextItem: SignalFeedItem) {
-  const idx = prev.findIndex(item => item.signalKey === nextItem.signalKey);
-  if (idx >= 0) {
-    const existing = prev[idx];
-    const merged: SignalFeedItem = {
-      ...existing,
-      ...nextItem,
-      createdAt: existing.createdAt,
-      updatedAt: nextItem.updatedAt,
-      status: isTerminalSignalStatus(existing.status) ? existing.status : nextItem.status,
-    };
-    return [merged, ...prev.filter((_, i) => i !== idx)].slice(0, 30);
-  }
-  return [nextItem, ...prev].slice(0, 30);
+  const normalizedNext = normalizeSignalFeedItem(nextItem);
+  const existing = prev.find(item => item.signalKey === normalizedNext.signalKey);
+  const nextConflictKey = normalizedNext.conflictKey || getSignalConflictKey(normalizedNext);
+
+  const remaining = prev.filter(item => {
+    if (item.signalKey === normalizedNext.signalKey) return false;
+    const itemConflictKey = item.conflictKey || getSignalConflictKey(item);
+    if (itemConflictKey !== nextConflictKey) return true;
+    return isTerminalSignalStatus(item.status);
+  });
+
+  const merged: SignalFeedItem = existing
+    ? {
+        ...existing,
+        ...normalizedNext,
+        conflictKey: nextConflictKey,
+        createdAt: existing.createdAt,
+        updatedAt: normalizedNext.updatedAt,
+        status: isTerminalSignalStatus(existing.status) ? existing.status : normalizedNext.status,
+      }
+    : {
+        ...normalizedNext,
+        conflictKey: nextConflictKey,
+      };
+
+  return [merged, ...remaining].slice(0, 30);
+}
+
+function normalizeSignalFeedItems(items: SignalFeedItem[]) {
+  return items
+    .map(item => normalizeSignalFeedItem(item))
+    .reverse()
+    .reduce((acc, item) => upsertSignalFeed(acc, item), [] as SignalFeedItem[]);
 }
 
 function resolveSignalOutcome(item: SignalFeedItem, price: number): SignalFeedStatus {
@@ -392,13 +491,13 @@ export default function App() {
         const remote = await fetchSignalFeed();
         if (cancelled) return;
         if (remote.length > 0) {
-          setSignalFeed(remote);
+          setSignalFeed(normalizeSignalFeedItems(remote));
           return;
         }
         if (cached.length > 0) {
           const migrated = await upsertSignalFeedItemsRemote(cached);
           if (!cancelled) {
-            setSignalFeed(migrated.length > 0 ? migrated : cached);
+            setSignalFeed(normalizeSignalFeedItems(migrated.length > 0 ? migrated : cached));
           }
           return;
         }
@@ -406,7 +505,7 @@ export default function App() {
       } catch (err) {
         console.warn('Failed to load signal feed from API:', err);
         if (!cancelled) {
-          setSignalFeed(cached);
+          setSignalFeed(normalizeSignalFeedItems(cached));
         }
       }
     })();

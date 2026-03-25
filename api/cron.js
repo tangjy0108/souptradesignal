@@ -1,5 +1,5 @@
 import { fetchKlines, SCAN_SYMBOLS } from './_strategy.js';
-import { listSignalsByKeys, listTrackableSignals, updateSignalStatuses, upsertSignals } from './_signalStore.js';
+import { listTrackableSignals, updateSignalStatuses, upsertSignalsWithMeta } from './_signalStore.js';
 import { sendTelegram } from './_telegram.js';
 
 const recentlySentSessionLiquidity = new Set();
@@ -39,6 +39,10 @@ function inSession(minuteOfDay, startMinute, endMinute) {
   return startMinute < endMinute
     ? minuteOfDay >= startMinute && minuteOfDay < endMinute
     : minuteOfDay >= startMinute || minuteOfDay < endMinute;
+}
+
+function getSignalDateKey(input) {
+  return getTimePartsInZone(new Date(input || Date.now()), 'America/New_York').dateKey;
 }
 
 function getCronContext(now = new Date()) {
@@ -183,12 +187,14 @@ function buildKillzoneRanges(klines) {
 }
 
 function buildKillzoneSignalKey(signal) {
+  const dateKey = getSignalDateKey(signal.candleTime || signal.updatedAt || Date.now());
   return [
     KILLZONE_STRATEGY_ID,
     signal.sym,
-    signal.setupType,
-    signal.direction,
-    String(signal.candleTime),
+    signal.currentSession || 'Off-Hours',
+    dateKey,
+    signal.setupType || 'SETUP',
+    signal.sweepSide || signal.direction || 'NEUTRAL',
   ].join('|');
 }
 
@@ -260,15 +266,18 @@ function toPersistedKillzoneSignal(signal, updatedAt = new Date().toISOString())
 
 async function persistKillzoneSignals(signals, updatedAt = new Date().toISOString()) {
   if (!Array.isArray(signals) || signals.length === 0) {
-    return { saved: [], existingSignalKeys: new Set() };
+    return { saved: [], existingSignalKeys: new Set(), changes: [] };
   }
 
   const rows = signals.map(signal => toPersistedKillzoneSignal(signal, updatedAt));
-  const existing = await listSignalsByKeys(rows.map(row => row.signalKey));
-  const existingSignalKeys = new Set(existing.map(item => item.signalKey));
-  const saved = await upsertSignals(rows);
+  const { items: saved, changes } = await upsertSignalsWithMeta(rows);
+  const existingSignalKeys = new Set(
+    changes
+      .filter(change => change.previous)
+      .map(change => change.current.signalKey)
+  );
 
-  return { saved, existingSignalKeys };
+  return { saved, existingSignalKeys, changes };
 }
 
 async function fetchLatestPrice(symbol) {
@@ -760,9 +769,9 @@ export default async function handler(req, res) {
 
     if (shouldRunFiveMinuteScans && (scanCtx.inLondonKillzone || scanCtx.inNyKillzone)) {
       killzoneSignals = await runICTKillzoneOpt3Scan(now);
-      const { saved, existingSignalKeys } = await persistKillzoneSignals(killzoneSignals, now.toISOString());
+      const { saved, existingSignalKeys, changes } = await persistKillzoneSignals(killzoneSignals, now.toISOString());
       persistedKillzoneSignals = saved;
-      killzoneDuplicatesSkipped = killzoneSignals.filter(signal => existingSignalKeys.has(signal.signalKey)).length;
+      killzoneDuplicatesSkipped = changes.filter(change => change.previous).length;
 
       for (const s of killzoneSignals) {
         if (existingSignalKeys.has(s.signalKey)) continue;
