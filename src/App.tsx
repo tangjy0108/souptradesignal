@@ -1128,6 +1128,18 @@ export default function App() {
     );
   }, [chartData, interval, showS5Overlay]);
 
+  const latestS5BullZoneId = useMemo(() => {
+    if (!s5Overlay) return null;
+    const bullZones = s5Overlay.fvgZones.filter(zone => zone.side === 'bull');
+    return bullZones.length ? bullZones[bullZones.length - 1].id : null;
+  }, [s5Overlay]);
+
+  const latestS5BearZoneId = useMemo(() => {
+    if (!s5Overlay) return null;
+    const bearZones = s5Overlay.fvgZones.filter(zone => zone.side === 'bear');
+    return bearZones.length ? bearZones[bearZones.length - 1].id : null;
+  }, [s5Overlay]);
+
   const volumeSpikes = useMemo(() => detectVolumeSpikes(chartData), [chartData]);
   const srLevels = useMemo(() => detectSupportResistance(chartData), [chartData]);
 
@@ -2178,11 +2190,11 @@ export default function App() {
               <div className="space-y-1.5">
                 <div className="flex justify-between text-[11px]">
                   <span className="text-[#787B86]">Bull FVG</span>
-                  <span className="font-mono text-[#22C55E]">{s5Overlay.activeBullFvgCount}</span>
+                  <span className="font-mono text-[#2196F3]">{s5Overlay.activeBullFvgCount}</span>
                 </div>
                 <div className="flex justify-between text-[11px]">
                   <span className="text-[#787B86]">Bear FVG</span>
-                  <span className="font-mono text-[#F97316]">{s5Overlay.activeBearFvgCount}</span>
+                  <span className="font-mono text-[#FF9800]">{s5Overlay.activeBearFvgCount}</span>
                 </div>
                 <div className="flex justify-between text-[11px]">
                   <span className="text-[#787B86]">Latest BOS</span>
@@ -2641,7 +2653,11 @@ export default function App() {
                     {showS5Overlay && interval === '15m' && s5Overlay && (
                       <>
                         <span>•</span>
-                        <span className="text-[#22C55E] text-xs">S5 {s5Overlay.activeBullFvgCount}B / {s5Overlay.activeBearFvgCount}S</span>
+                        <span className="text-xs">
+                          <span className="text-[#2196F3]">Bull FVG {s5Overlay.activeBullFvgCount}</span>
+                          <span className="text-[#787B86]"> / </span>
+                          <span className="text-[#FF9800]">Bear FVG {s5Overlay.activeBearFvgCount}</span>
+                        </span>
                       </>
                     )}
                     {showS5Overlay && interval !== '15m' && <span className="text-[#F59E0B] text-xs">S5 15m only</span>}
@@ -2760,12 +2776,12 @@ export default function App() {
                           y2={zone.y2}
                           ifOverflow="extendDomain"
                           {...({
-                            fill: zone.side === 'bull' ? '#22C55E' : '#F23645',
-                            fillOpacity: zone.side === 'bull' ? 0.11 : 0.09,
-                            stroke: zone.side === 'bull' ? '#22C55E' : '#F23645',
-                            strokeWidth: 1,
+                            fill: zone.side === 'bull' ? '#2196F3' : '#FF9800',
+                            fillOpacity: zone.id === latestS5BullZoneId || zone.id === latestS5BearZoneId ? 0.18 : 0.13,
+                            stroke: zone.side === 'bull' ? '#2196F3' : '#FF9800',
+                            strokeWidth: zone.id === latestS5BullZoneId || zone.id === latestS5BearZoneId ? 1.4 : 1,
                             strokeDasharray: '4 4',
-                            strokeOpacity: 0.5,
+                            strokeOpacity: zone.id === latestS5BullZoneId || zone.id === latestS5BearZoneId ? 0.8 : 0.55,
                           } as any)}
                         />
                       ))}
