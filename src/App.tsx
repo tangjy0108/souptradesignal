@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ComposedChart, Bar, Cell, ReferenceArea, ReferenceLine, Customized
+  ResponsiveContainer, ComposedChart, Bar, Cell, ReferenceArea, ReferenceLine, ReferenceDot, Customized
 } from 'recharts';
 import {
   Activity, Settings, ChevronDown, Plus, Play, ShieldAlert,
@@ -17,15 +17,25 @@ import { useAlerts } from './hooks/useAlerts';
 import { useMultiTimeframe } from './hooks/useMultiTimeframe';
 import { detectHarmonics, HarmonicPattern } from './lib/harmonics';
 import { detectSNRFVG, SNRFVGResult } from './lib/snrFvg';
+import { computeS5Overlay } from './lib/s5Overlay';
 
 // ─── 圖表參數 Preset ───
 const CHART_PRESET_KEY = 'qv_chart_preset';
+const S5_OVERLAY_KEY = 'qv_show_s5_overlay';
 interface ChartPreset {
   name: string; strategyId: string;
   snrLqP: { snrStrength: number; fvgMinSizePct: number; volumeThreshold: number; signalGap: number };
 }
 function readChartPreset(): ChartPreset | null {
   try { return JSON.parse(localStorage.getItem(CHART_PRESET_KEY) || 'null'); } catch { return null; }
+}
+function readS5OverlayPreference() {
+  try {
+    const raw = localStorage.getItem(S5_OVERLAY_KEY);
+    return raw === null ? true : JSON.parse(raw);
+  } catch {
+    return true;
+  }
 }
 
 
@@ -884,6 +894,7 @@ export default function App() {
   const [showBB,   setShowBB]         = useState(false);
   const [showSR,   setShowSR]         = useState(false);
   const [showVolSpike, setShowVolSpike] = useState(false);
+  const [showS5Overlay, setShowS5Overlay] = useState<boolean>(() => readS5OverlayPreference());
   const [strategyResult, setStrategyResult]       = useState<StrategyResult | null>(null);
   const [signalFeed, setSignalFeed] = useState<SignalFeedItem[]>(() => readSignalFeed());
   const [isStrategyRunning, setIsStrategyRunning] = useState(false);
@@ -972,6 +983,7 @@ export default function App() {
   useEffect(() => { try { localStorage.setItem('favoriteSymbols', JSON.stringify(favorites)); } catch {} }, [favorites]);
   useEffect(() => { try { localStorage.setItem('customSymbols', JSON.stringify(customSymbols)); } catch {} }, [customSymbols]);
   useEffect(() => { try { localStorage.setItem(SIGNAL_FEED_KEY, JSON.stringify(signalFeed)); } catch {} }, [signalFeed]);
+  useEffect(() => { try { localStorage.setItem(S5_OVERLAY_KEY, JSON.stringify(showS5Overlay)); } catch {} }, [showS5Overlay]);
 
   // Fetch all Binance USDT pairs
   useEffect(() => {
@@ -1097,6 +1109,24 @@ export default function App() {
       return { ...d, hpLine };
     });
   }, [chartData, harmonicPatterns]);
+
+  const s5Overlay = useMemo(() => {
+    if (!showS5Overlay || interval !== '15m' || chartData.length === 0) return null;
+    return computeS5Overlay(
+      chartData.slice(-400).map(d => ({
+        time: d.time,
+        timeKey: d.timeStr,
+        open: d.open,
+        high: d.high,
+        low: d.low,
+        close: d.close,
+      })),
+      10,
+      20,
+      20,
+      30,
+    );
+  }, [chartData, interval, showS5Overlay]);
 
   const volumeSpikes = useMemo(() => detectVolumeSpikes(chartData), [chartData]);
   const srLevels = useMemo(() => detectSupportResistance(chartData), [chartData]);
@@ -2128,6 +2158,53 @@ export default function App() {
           </div>
         )}
 
+        {showS5Overlay && (
+          <div className="mt-3 rounded-lg border border-[#2A2E39] bg-[#0F1420] p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-[#22C55E]" />
+                <span className="text-sm font-semibold text-[#D1D4DC]">S5 Overlay</span>
+              </div>
+              <span className={`text-[10px] px-2 py-0.5 rounded-full border ${interval === '15m' ? 'border-[#22C55E]/30 text-[#22C55E] bg-[#22C55E]/10' : 'border-[#F59E0B]/30 text-[#F59E0B] bg-[#F59E0B]/10'}`}>
+                {interval === '15m' ? '15m active' : '15m only'}
+              </span>
+            </div>
+
+            {interval !== '15m' ? (
+              <div className="text-[11px] text-[#787B86] leading-relaxed">
+                S5 目前只在 15m 圖上計算，切回 15m 就會顯示 BOS 與 active FVG 區。
+              </div>
+            ) : s5Overlay ? (
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-[11px]">
+                  <span className="text-[#787B86]">Bull FVG</span>
+                  <span className="font-mono text-[#22C55E]">{s5Overlay.activeBullFvgCount}</span>
+                </div>
+                <div className="flex justify-between text-[11px]">
+                  <span className="text-[#787B86]">Bear FVG</span>
+                  <span className="font-mono text-[#F97316]">{s5Overlay.activeBearFvgCount}</span>
+                </div>
+                <div className="flex justify-between text-[11px]">
+                  <span className="text-[#787B86]">Latest BOS</span>
+                  <span className={`font-mono ${s5Overlay.lastBosMark?.side === 'bull' ? 'text-[#22C55E]' : s5Overlay.lastBosMark?.side === 'bear' ? 'text-[#F23645]' : 'text-[#787B86]'}`}>
+                    {s5Overlay.lastBosMark ? `${s5Overlay.lastBosMark.side.toUpperCase()} @ ${formatPriceString(s5Overlay.lastBosMark.price)}` : 'No recent BOS'}
+                  </span>
+                </div>
+                <div className="flex justify-between text-[11px]">
+                  <span className="text-[#787B86]">Swing High</span>
+                  <span className="font-mono text-[#86EFAC]">{s5Overlay.currentSwingHigh ? formatPriceString(s5Overlay.currentSwingHigh) : '—'}</span>
+                </div>
+                <div className="flex justify-between text-[11px]">
+                  <span className="text-[#787B86]">Swing Low</span>
+                  <span className="font-mono text-[#FDA4AF]">{s5Overlay.currentSwingLow ? formatPriceString(s5Overlay.currentSwingLow) : '—'}</span>
+                </div>
+              </div>
+            ) : (
+              <div className="text-[11px] text-[#787B86]">資料不足，至少需要 23 根以上 K 線才能畫出 S5 結構。</div>
+            )}
+          </div>
+        )}
+
         {strategyId !== 'harmonics' && strategyId !== 'snr_fvg' && strategyResult ? (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -2387,6 +2464,7 @@ export default function App() {
               { key: 'macd',     label: 'MACD', active: showMACD,     toggle: () => setShowMACD(p => !p),     color: '#FF9800', Icon: Activity   },
               { key: 'bb',       label: 'BB',   active: showBB,       toggle: () => setShowBB(p => !p),       color: '#9C27B0', Icon: TrendingUp },
               { key: 'sr',       label: 'S/R',  active: showSR,       toggle: () => setShowSR(p => !p),       color: '#607D8B', Icon: LayoutGrid },
+              { key: 's5',       label: 'S5',   active: showS5Overlay, toggle: () => setShowS5Overlay(p => !p), color: '#22C55E', Icon: ShieldAlert },
               { key: 'volspike', label: '爆量', active: showVolSpike, toggle: () => setShowVolSpike(p => !p), color: '#FF9800', Icon: BarChart2  },
             ].map(({ key, label, active, toggle, color, Icon }) => (
               <button key={key} onClick={toggle}
@@ -2506,14 +2584,15 @@ export default function App() {
             </button>
           ))}
           <div className="h-4 w-px bg-[#2A2E39] shrink-0 mx-1" />
-          {[
-            { key: 'sma',      label: 'SMA',  active: showSMA,      toggle: () => setShowSMA(p => !p),      color: '#2962FF' },
-            { key: 'rsi',      label: 'RSI',  active: showRSI,      toggle: () => setShowRSI(p => !p),      color: '#E91E63' },
-            { key: 'macd',     label: 'MACD', active: showMACD,     toggle: () => setShowMACD(p => !p),     color: '#FF9800' },
-            { key: 'bb',       label: 'BB',   active: showBB,       toggle: () => setShowBB(p => !p),       color: '#9C27B0' },
-            { key: 'sr',       label: 'S/R',  active: showSR,       toggle: () => setShowSR(p => !p),       color: '#607D8B' },
-            { key: 'volspike', label: '爆量', active: showVolSpike, toggle: () => setShowVolSpike(p => !p), color: '#FF9800' },
-          ].map(({ key, label, active, toggle, color }) => (
+            {[
+              { key: 'sma',      label: 'SMA',  active: showSMA,      toggle: () => setShowSMA(p => !p),      color: '#2962FF' },
+              { key: 'rsi',      label: 'RSI',  active: showRSI,      toggle: () => setShowRSI(p => !p),      color: '#E91E63' },
+              { key: 'macd',     label: 'MACD', active: showMACD,     toggle: () => setShowMACD(p => !p),     color: '#FF9800' },
+              { key: 'bb',       label: 'BB',   active: showBB,       toggle: () => setShowBB(p => !p),       color: '#9C27B0' },
+              { key: 'sr',       label: 'S/R',  active: showSR,       toggle: () => setShowSR(p => !p),       color: '#607D8B' },
+              { key: 's5',       label: 'S5',   active: showS5Overlay, toggle: () => setShowS5Overlay(p => !p), color: '#22C55E' },
+              { key: 'volspike', label: '爆量', active: showVolSpike, toggle: () => setShowVolSpike(p => !p), color: '#FF9800' },
+            ].map(({ key, label, active, toggle, color }) => (
             <button key={key} onClick={toggle}
               style={active ? { borderColor: `${color}40`, color, background: `${color}15` } : {}}
               className={`px-2 py-1 text-xs rounded-md border transition-all shrink-0 font-medium ${active ? '' : 'bg-transparent border-[#2A2E39] text-[#787B86]'}`}>
@@ -2559,6 +2638,13 @@ export default function App() {
                   <div className="text-sm text-[#787B86] flex items-center gap-2 font-medium">
                     <span className="flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> {interval}</span>
                     <span>•</span><span>Binance</span>
+                    {showS5Overlay && interval === '15m' && s5Overlay && (
+                      <>
+                        <span>•</span>
+                        <span className="text-[#22C55E] text-xs">S5 {s5Overlay.activeBullFvgCount}B / {s5Overlay.activeBearFvgCount}S</span>
+                      </>
+                    )}
+                    {showS5Overlay && interval !== '15m' && <span className="text-[#F59E0B] text-xs">S5 15m only</span>}
                     {showVolSpike && volumeSpikes.size > 0 && <span className="text-[#FF9800] text-xs">⚡ {volumeSpikes.size} 爆量</span>}
                   </div>
                 </div>
@@ -2664,6 +2750,47 @@ export default function App() {
                         {...({ fill: strategyResult.direction === 'LONG' ? '#2962FF' : '#A855F7', fillOpacity: 0.16, stroke: strategyResult.direction === 'LONG' ? '#2962FF' : '#A855F7', strokeWidth: 1, strokeDasharray: '3 3' } as any)} />
                     )}
 
+                    {showS5Overlay && interval === '15m' && s5Overlay && (<>
+                      {s5Overlay.fvgZones.map(zone => (
+                        <ReferenceArea
+                          key={zone.id}
+                          x1={zone.startTimeKey}
+                          x2={zone.endTimeKey}
+                          y1={zone.y1}
+                          y2={zone.y2}
+                          ifOverflow="extendDomain"
+                          {...({
+                            fill: zone.side === 'bull' ? '#22C55E' : '#F23645',
+                            fillOpacity: zone.side === 'bull' ? 0.11 : 0.09,
+                            stroke: zone.side === 'bull' ? '#22C55E' : '#F23645',
+                            strokeWidth: 1,
+                            strokeDasharray: '4 4',
+                            strokeOpacity: 0.5,
+                          } as any)}
+                        />
+                      ))}
+                      {s5Overlay.currentSwingHigh && (
+                        <ReferenceLine
+                          y={s5Overlay.currentSwingHigh}
+                          stroke="#22C55E"
+                          strokeDasharray="6 4"
+                          strokeWidth={1.2}
+                          strokeOpacity={0.55}
+                          label={{ position: 'insideTopLeft', value: 'S5 SH', fill: '#86EFAC', fontSize: 10, fontWeight: 600 }}
+                        />
+                      )}
+                      {s5Overlay.currentSwingLow && (
+                        <ReferenceLine
+                          y={s5Overlay.currentSwingLow}
+                          stroke="#F23645"
+                          strokeDasharray="6 4"
+                          strokeWidth={1.2}
+                          strokeOpacity={0.55}
+                          label={{ position: 'insideBottomLeft', value: 'S5 SL', fill: '#FDA4AF', fontSize: 10, fontWeight: 600 }}
+                        />
+                      )}
+                    </>)}
+
                     {/* BB */}
                     {showBB && <Line type="monotone" dataKey="bbUpper" stroke="#9C27B0" dot={false} strokeWidth={1} strokeDasharray="3 3" isAnimationActive={false} name="BB Upper" />}
                     {showBB && <Line type="monotone" dataKey="bbLower" stroke="#9C27B0" dot={false} strokeWidth={1} strokeDasharray="3 3" isAnimationActive={false} name="BB Lower" />}
@@ -2737,6 +2864,19 @@ export default function App() {
                     {showVolSpike && chartData.map((d, i) => volumeSpikes.has(i) ? (
                       <ReferenceLine key={`vs${i}`} x={d.timeStr} stroke="#FF9800" strokeWidth={2} strokeOpacity={0.5} />
                     ) : null)}
+
+                    {showS5Overlay && interval === '15m' && s5Overlay && s5Overlay.bosMarks.map((mark, index) => (
+                      <ReferenceDot
+                        key={`s5-bos-${index}-${mark.side}`}
+                        x={mark.timeKey}
+                        y={mark.price}
+                        r={4.5}
+                        ifOverflow="extendDomain"
+                        fill={mark.side === 'bull' ? '#22C55E' : '#F23645'}
+                        stroke="#0B0E14"
+                        strokeWidth={1.5}
+                      />
+                    ))}
 
                     {showSMA && <Line type="monotone" dataKey="sma20" stroke="#2962FF" dot={false} strokeWidth={1.5} isAnimationActive={false} name="SMA 20" />}
                     {showSMA && <Line type="monotone" dataKey="sma50" stroke="#FF9800" dot={false} strokeWidth={1.5} isAnimationActive={false} name="SMA 50" />}
