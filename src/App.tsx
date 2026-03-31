@@ -2796,71 +2796,6 @@ export default function App() {
                         {...({ fill: strategyResult.direction === 'LONG' ? '#2962FF' : '#A855F7', fillOpacity: 0.16, stroke: strategyResult.direction === 'LONG' ? '#2962FF' : '#A855F7', strokeWidth: 1, strokeDasharray: '3 3' } as any)} />
                     )}
 
-                    {showS5Overlay && interval === '15m' && s5Overlay && (<>
-                      {s5Overlay.fvgZones.map(zone => (
-                        <ReferenceArea
-                          key={zone.id}
-                          x1={zone.startTimeKey}
-                          x2={zone.endTimeKey}
-                          y1={zone.y1}
-                          y2={zone.y2}
-                          ifOverflow="extendDomain"
-                          {...({
-                            fill: zone.side === 'bull' ? '#2196F3' : '#FF9800',
-                            fillOpacity: zone.id === latestS5BullZoneId || zone.id === latestS5BearZoneId ? 0.18 : 0.13,
-                            stroke: zone.side === 'bull' ? '#2196F3' : '#FF9800',
-                            strokeWidth: zone.id === latestS5BullZoneId || zone.id === latestS5BearZoneId ? 1.4 : 1,
-                            strokeDasharray: '4 4',
-                            strokeOpacity: zone.id === latestS5BullZoneId || zone.id === latestS5BearZoneId ? 0.8 : 0.55,
-                          } as any)}
-                        />
-                      ))}
-                      {s5Overlay.fvgZones.map(zone => {
-                        const zoneMeta = s5ZoneLabels.get(zone.id);
-                        if (!zoneMeta) return null;
-
-                        return (
-                          <ReferenceDot
-                            key={`s5-zone-label-${zone.id}`}
-                            x={zone.endTimeKey}
-                            y={(zone.y1 + zone.y2) / 2}
-                            r={3}
-                            ifOverflow="extendDomain"
-                            fill={zoneMeta.color}
-                            stroke="#0B0E14"
-                            strokeWidth={1}
-                            label={{
-                              position: 'left',
-                              value: zoneMeta.label,
-                              fill: zoneMeta.color,
-                              fontSize: 10,
-                              fontWeight: 700,
-                            }}
-                          />
-                        );
-                      })}
-                      {s5Overlay.currentSwingHigh && (
-                        <ReferenceLine
-                          y={s5Overlay.currentSwingHigh}
-                          stroke="#22C55E"
-                          strokeDasharray="6 4"
-                          strokeWidth={1.2}
-                          strokeOpacity={0.55}
-                          label={{ position: 'insideTopLeft', value: 'S5 SH', fill: '#86EFAC', fontSize: 10, fontWeight: 600 }}
-                        />
-                      )}
-                      {s5Overlay.currentSwingLow && (
-                        <ReferenceLine
-                          y={s5Overlay.currentSwingLow}
-                          stroke="#F23645"
-                          strokeDasharray="6 4"
-                          strokeWidth={1.2}
-                          strokeOpacity={0.55}
-                          label={{ position: 'insideBottomLeft', value: 'S5 SL', fill: '#FDA4AF', fontSize: 10, fontWeight: 600 }}
-                        />
-                      )}
-                    </>)}
-
                     {/* BB */}
                     {showBB && <Line type="monotone" dataKey="bbUpper" stroke="#9C27B0" dot={false} strokeWidth={1} strokeDasharray="3 3" isAnimationActive={false} name="BB Upper" />}
                     {showBB && <Line type="monotone" dataKey="bbLower" stroke="#9C27B0" dot={false} strokeWidth={1} strokeDasharray="3 3" isAnimationActive={false} name="BB Lower" />}
@@ -2934,6 +2869,74 @@ export default function App() {
                     {showVolSpike && chartData.map((d, i) => volumeSpikes.has(i) ? (
                       <ReferenceLine key={`vs${i}`} x={d.timeStr} stroke="#FF9800" strokeWidth={2} strokeOpacity={0.5} />
                     ) : null)}
+
+                    {showS5Overlay && interval === '15m' && s5Overlay && (<>
+                      {s5Overlay.fvgZones.map(zone => {
+                        const isLatestZone = zone.id === latestS5BullZoneId || zone.id === latestS5BearZoneId;
+                        return (
+                          <ReferenceArea
+                            key={zone.id}
+                            x1={zone.startTimeKey}
+                            x2={zone.endTimeKey}
+                            y1={zone.y1}
+                            y2={zone.y2}
+                            ifOverflow="extendDomain"
+                            {...({
+                              fill: zone.side === 'bull' ? '#2196F3' : '#FF9800',
+                              fillOpacity: isLatestZone ? 0.28 : 0.2,
+                              stroke: zone.side === 'bull' ? '#2196F3' : '#FF9800',
+                              strokeWidth: isLatestZone ? 1.8 : 1.2,
+                              strokeDasharray: isLatestZone ? '0' : '4 4',
+                              strokeOpacity: isLatestZone ? 0.95 : 0.72,
+                            } as any)}
+                          />
+                        );
+                      })}
+                      {s5Overlay.fvgZones.map(zone => {
+                        const zoneMeta = s5ZoneLabels.get(zone.id);
+                        if (!zoneMeta) return null;
+
+                        return (
+                          <ReferenceDot
+                            key={`s5-zone-label-${zone.id}`}
+                            x={zone.endTimeKey}
+                            y={(zone.y1 + zone.y2) / 2}
+                            r={3}
+                            ifOverflow="extendDomain"
+                            fill={zoneMeta.color}
+                            stroke="#0B0E14"
+                            strokeWidth={1}
+                            label={{
+                              position: 'left',
+                              value: zoneMeta.label,
+                              fill: zoneMeta.color,
+                              fontSize: 10,
+                              fontWeight: 700,
+                            }}
+                          />
+                        );
+                      })}
+                      {s5Overlay.currentSwingHigh && (
+                        <ReferenceLine
+                          y={s5Overlay.currentSwingHigh}
+                          stroke="#22C55E"
+                          strokeDasharray="6 4"
+                          strokeWidth={1.2}
+                          strokeOpacity={0.55}
+                          label={{ position: 'insideTopLeft', value: 'S5 SH', fill: '#86EFAC', fontSize: 10, fontWeight: 600 }}
+                        />
+                      )}
+                      {s5Overlay.currentSwingLow && (
+                        <ReferenceLine
+                          y={s5Overlay.currentSwingLow}
+                          stroke="#F23645"
+                          strokeDasharray="6 4"
+                          strokeWidth={1.2}
+                          strokeOpacity={0.55}
+                          label={{ position: 'insideBottomLeft', value: 'S5 SL', fill: '#FDA4AF', fontSize: 10, fontWeight: 600 }}
+                        />
+                      )}
+                    </>)}
 
                     {showS5Overlay && interval === '15m' && s5Overlay && s5Overlay.bosMarks.map((mark, index) => (
                       <ReferenceDot
