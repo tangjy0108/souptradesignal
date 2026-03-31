@@ -60,7 +60,13 @@ const CandlestickShape = (props: any) => {
   const isUp = close >= open;
   const color = isUp ? '#089981' : '#F23645';
   const range = high - low;
-  if (range === 0) return <line x1={x} y1={y} x2={x + width} y2={y} stroke={color} strokeWidth={1.5} />;
+  const bodyWidth = Math.max(3, Math.min(width * 0.62, 7));
+  const bodyX = x + (width - bodyWidth) / 2;
+  const wickWidth = width < 8 ? 1 : 1.15;
+
+  if (range === 0) {
+    return <line x1={bodyX} y1={y} x2={bodyX + bodyWidth} y2={y} stroke={color} strokeWidth={wickWidth} />;
+  }
   const pxPerVal = height / range;
   const yOpen  = y + (high - open)  * pxPerVal;
   const yClose = y + (high - close) * pxPerVal;
@@ -68,9 +74,9 @@ const CandlestickShape = (props: any) => {
   const rectH  = Math.max(Math.abs(yOpen - yClose), 1);
   const cx = x + width / 2;
   return (
-    <g stroke={color} fill={color} strokeWidth={1.5}>
-      <line x1={cx} y1={y} x2={cx} y2={y + height} />
-      <rect x={x} y={rectY} width={width} height={rectH} />
+    <g stroke={color} fill={color}>
+      <line x1={cx} y1={y} x2={cx} y2={y + height} strokeWidth={wickWidth} />
+      <rect x={bodyX} y={rectY} width={bodyWidth} height={rectH} strokeWidth={0.9} rx={0.6} ry={0.6} />
     </g>
   );
 };
