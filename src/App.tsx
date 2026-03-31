@@ -1140,6 +1140,27 @@ export default function App() {
     return bearZones.length ? bearZones[bearZones.length - 1].id : null;
   }, [s5Overlay]);
 
+  const s5ZoneLabels = useMemo(() => {
+    const labels = new Map<string, { label: string; color: string }>();
+    if (!s5Overlay) return labels;
+
+    let bullIndex = 0;
+    let bearIndex = 0;
+
+    s5Overlay.fvgZones.forEach(zone => {
+      if (zone.side === 'bull') {
+        bullIndex += 1;
+        labels.set(zone.id, { label: `B${bullIndex}`, color: '#2196F3' });
+        return;
+      }
+
+      bearIndex += 1;
+      labels.set(zone.id, { label: `S${bearIndex}`, color: '#FF9800' });
+    });
+
+    return labels;
+  }, [s5Overlay]);
+
   const volumeSpikes = useMemo(() => detectVolumeSpikes(chartData), [chartData]);
   const srLevels = useMemo(() => detectSupportResistance(chartData), [chartData]);
 
@@ -2210,6 +2231,9 @@ export default function App() {
                   <span className="text-[#787B86]">Swing Low</span>
                   <span className="font-mono text-[#FDA4AF]">{s5Overlay.currentSwingLow ? formatPriceString(s5Overlay.currentSwingLow) : '—'}</span>
                 </div>
+                <div className="text-[10px] text-[#6B7280] pt-1">
+                  圖上標記：Bull FVG 會標成 B1、B2；Bear FVG 會標成 S1、S2。
+                </div>
               </div>
             ) : (
               <div className="text-[11px] text-[#787B86]">資料不足，至少需要 23 根以上 K 線才能畫出 S5 結構。</div>
@@ -2785,6 +2809,30 @@ export default function App() {
                           } as any)}
                         />
                       ))}
+                      {s5Overlay.fvgZones.map(zone => {
+                        const zoneMeta = s5ZoneLabels.get(zone.id);
+                        if (!zoneMeta) return null;
+
+                        return (
+                          <ReferenceDot
+                            key={`s5-zone-label-${zone.id}`}
+                            x={zone.endTimeKey}
+                            y={(zone.y1 + zone.y2) / 2}
+                            r={3}
+                            ifOverflow="extendDomain"
+                            fill={zoneMeta.color}
+                            stroke="#0B0E14"
+                            strokeWidth={1}
+                            label={{
+                              position: 'left',
+                              value: zoneMeta.label,
+                              fill: zoneMeta.color,
+                              fontSize: 10,
+                              fontWeight: 700,
+                            }}
+                          />
+                        );
+                      })}
                       {s5Overlay.currentSwingHigh && (
                         <ReferenceLine
                           y={s5Overlay.currentSwingHigh}
