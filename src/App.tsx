@@ -925,6 +925,13 @@ export default function App() {
   }, [signalFeed]);
 
   useEffect(() => {
+    const handleResize = () => setIsMobileViewport(window.innerWidth < 1024);
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     const cached = readSignalFeed();
 
@@ -966,6 +973,10 @@ export default function App() {
   const [showScanner, setShowScanner]   = useState(false);
   const [scanSymbols, setScanSymbols]   = useState<string[]>([]);
   const [showAlertPanel, setShowAlertPanel] = useState(false);
+  const [isMobileViewport, setIsMobileViewport] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.innerWidth < 1024;
+  });
 
   // Search
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -1166,6 +1177,15 @@ export default function App() {
 
     return labels;
   }, [s5Overlay]);
+
+  const visibleS5Zones = useMemo(() => {
+    if (!s5Overlay) return [];
+    if (!isMobileViewport) return s5Overlay.fvgZones;
+
+    const latestBull = s5Overlay.fvgZones.filter(zone => zone.side === 'bull').slice(-1);
+    const latestBear = s5Overlay.fvgZones.filter(zone => zone.side === 'bear').slice(-1);
+    return [...latestBull, ...latestBear];
+  }, [isMobileViewport, s5Overlay]);
 
   const volumeSpikes = useMemo(() => detectVolumeSpikes(chartData), [chartData]);
   const srLevels = useMemo(() => detectSupportResistance(chartData), [chartData]);
@@ -2240,6 +2260,11 @@ export default function App() {
                 <div className="text-[10px] text-[#6B7280] pt-1">
                   圖上標記：Bull FVG 會標成 B1、B2；Bear FVG 會標成 S1、S2。
                 </div>
+                {isMobileViewport && (
+                  <div className="text-[10px] text-[#6B7280]">
+                    手機圖表只保留最新的 Bull / Bear FVG 和最新 BOS，避免畫面擠在一起。
+                  </div>
+                )}
               </div>
             ) : (
               <div className="text-[11px] text-[#787B86]">資料不足，至少需要 23 根以上 K 線才能畫出 S5 結構。</div>
@@ -2661,7 +2686,7 @@ export default function App() {
           ) : (
             <div className="flex-1 flex flex-col p-4 gap-4">
               {/* Price header */}
-              <div className="w-full h-[calc(100svh-240px)] lg:h-[500px] bg-[#131722] rounded-xl border border-[#2A2E39] p-4 pt-6 relative shrink-0 shadow-sm">
+              <div className="w-full h-[calc(100svh-220px)] lg:h-[500px] bg-[#131722] rounded-xl border border-[#2A2E39] p-4 pt-6 relative shrink-0 shadow-sm">
                 <div className="absolute top-4 left-4 z-10 flex flex-col gap-1 pointer-events-none">
                   <div className="flex items-baseline gap-3 pointer-events-auto flex-wrap">
                     <div className="text-2xl font-bold text-white flex items-center gap-2">
@@ -2871,7 +2896,7 @@ export default function App() {
                     ) : null)}
 
                     {showS5Overlay && interval === '15m' && s5Overlay && (<>
-                      {s5Overlay.fvgZones.map(zone => {
+                      {visibleS5Zones.map(zone => {
                         const isLatestZone = zone.id === latestS5BullZoneId || zone.id === latestS5BearZoneId;
                         return (
                           <ReferenceArea
@@ -2892,7 +2917,7 @@ export default function App() {
                           />
                         );
                       })}
-                      {s5Overlay.fvgZones.map(zone => {
+                      {!isMobileViewport && visibleS5Zones.map(zone => {
                         const zoneMeta = s5ZoneLabels.get(zone.id);
                         if (!zoneMeta) return null;
 
@@ -2937,19 +2962,6 @@ export default function App() {
                         />
                       )}
                     </>)}
-
-                    {showS5Overlay && interval === '15m' && s5Overlay && s5Overlay.bosMarks.map((mark, index) => (
-                      <ReferenceDot
-                        key={`s5-bos-${index}-${mark.side}`}
-                        x={mark.timeKey}
-                        y={mark.price}
-                        r={4.5}
-                        ifOverflow="extendDomain"
-                        fill={mark.side === 'bull' ? '#22C55E' : '#F23645'}
-                        stroke="#0B0E14"
-                        strokeWidth={1.5}
-                      />
-                    ))}
 
                     {showSMA && <Line type="monotone" dataKey="sma20" stroke="#2962FF" dot={false} strokeWidth={1.5} isAnimationActive={false} name="SMA 20" />}
                     {showSMA && <Line type="monotone" dataKey="sma50" stroke="#FF9800" dot={false} strokeWidth={1.5} isAnimationActive={false} name="SMA 50" />}
