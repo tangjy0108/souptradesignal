@@ -3095,7 +3095,7 @@ export default function App() {
                   {STRATEGIES.map(s => (
                     <button key={s.id} onClick={() => setStrategyId(s.id)}
                       className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ${strategyId === s.id ? 'bg-[#2962FF] text-white' : 'bg-[#1E222D] text-[#787B86] border border-[#2A2E39]'}`}>
-                      {s.id === 'ms_ob' ? 'MS+OB' : s.id === 'structural_reversal' ? 'PRZ' : s.id === 'smc_session' ? 'SMC' : s.id === 'ict_killzone_opt3' ? 'KZ' : s.id === 'snr_fvg' ? 'SNR+FVG' : '諧波'}
+                      {s.id === 'atm_asia' ? 'ATM' : s.id === 'ms_ob' ? 'MS+OB' : s.id === 'structural_reversal' ? 'PRZ' : s.id === 'smc_session' ? 'SMC' : s.id === 'ict_killzone_opt3' ? 'KZ' : s.id === 'snr_fvg' ? 'SNR+FVG' : '諧波'}
                     </button>
                   ))}
                 </div>
