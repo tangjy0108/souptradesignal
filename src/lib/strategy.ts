@@ -1,6 +1,8 @@
 import type { Kline } from '../hooks/useKlines';
 import { calculateEMA, calculateATR, calculateADX, calculateRSI } from './indicators';
 
+export type ATMState = 'IDLE' | 'ASIA_RANGE_FORMING' | 'ASIA_RANGE_LOCKED' | 'WAITING_RETEST' | 'WAITING_WICK' | 'SIGNAL_FIRED';
+
 export type StrategyResult = {
   symbol: string;
   time: string;
@@ -43,70 +45,50 @@ export type StrategyResult = {
     fvgLow: number;
     fvgHigh: number;
   };
+  atmDetails?: {
+    state: ATMState;
+    asiaHigh: number;
+    asiaLow: number;
+    bias: 'LONG' | 'SHORT' | null;
+    interactionType: 'SWEEP' | 'BREAKOUT' | null;
+    ob: { high: number; low: number; mid: number } | null;
+    entry: number;
+    sl: number;
+    tp1: number;
+    tp2: number;
+    checklist: {
+      rangeFormed: boolean;
+      sweepOrBreakout: boolean;
+      obFound: boolean;
+      displaced: boolean;
+      retest: boolean;
+      wickRejection: boolean;
+    };
+  };
 } | null;
 
-const BINANCE_URLS = [
-  'https://data-api.binance.vision',
-  'https://api.binance.com',
-  'https://api1.binance.com',
-  'https://api2.binance.com',
-  'https://api3.binance.com',
-  'https://api4.binance.com'
-];
+const BINGX_BASE = 'https://open-api.bingx.com/openApi/swap/v2/quote';
+
+function toBingxSymbol(symbol: string): string {
+  if (symbol.includes('-')) return symbol;
+  if (symbol.endsWith('USDT')) return symbol.slice(0, -4) + '-USDT';
+  return symbol;
+}
 
 async function fetchKlinesWithFallback(symbol: string, interval: string, limit: number) {
-  let lastError;
-  
-  // Try Binance endpoints first
-  for (const baseUrl of BINANCE_URLS) {
-    try {
-      const res = await fetch(`${baseUrl}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
-      if (res.ok) {
-        const json = await res.json();
-        return json.map((d: any) => ({
-          time: d[0],
-          open: parseFloat(d[1]),
-          high: parseFloat(d[2]),
-          low: parseFloat(d[3]),
-          close: parseFloat(d[4]),
-        }));
-      }
-    } catch (e) {
-      lastError = e;
-      console.warn(`Binance failed for ${symbol} ${interval} on ${baseUrl}, trying next...`);
-    }
-  }
-
-  // If all Binance endpoints fail, fallback to KuCoin via CORS proxy
-  try {
-    console.warn(`All Binance endpoints failed for ${symbol} ${interval}, trying KuCoin...`);
-    const kucoinSymbol = symbol.replace('USDT', '-USDT');
-    const kucoinInterval = interval === '1h' ? '1hour' : interval === '4h' ? '4hour' : interval === '1d' ? '1day' : interval.replace('m', 'min');
-    
-    const now = Math.floor(Date.now() / 1000);
-    let seconds = 60;
-    if (interval.endsWith('m')) seconds = parseInt(interval.replace('m', '')) * 60;
-    if (interval.endsWith('h')) seconds = parseInt(interval.replace('h', '')) * 3600;
-    if (interval.endsWith('d')) seconds = parseInt(interval.replace('d', '')) * 86400;
-    const startAt = now - (limit * seconds * 1.5); // 1.5x buffer
-
-    const kucoinUrl = `https://api.kucoin.com/api/v1/market/candles?type=${kucoinInterval}&symbol=${kucoinSymbol}&startAt=${startAt}&endAt=${now}`;
-    const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(kucoinUrl)}`);
-    
-    if (!res.ok) throw new Error('KuCoin error');
-    const json = await res.json();
-    if (json.code !== '200000') throw new Error(json.msg);
-    
-    return json.data.map((d: any) => ({
-      time: parseInt(d[0]) * 1000,
-      open: parseFloat(d[1]),
-      close: parseFloat(d[2]),
-      high: parseFloat(d[3]),
-      low: parseFloat(d[4]),
-    })).reverse();
-  } catch (e) {
-    throw lastError || new Error('All endpoints failed');
-  }
+  const bingxSym = toBingxSymbol(symbol);
+  const url = `${BINGX_BASE}/klines?symbol=${encodeURIComponent(bingxSym)}&interval=${interval}&limit=${limit}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`BINGx fetch failed for ${symbol} ${interval}`);
+  const json = await res.json();
+  if (json.code !== 0 || !Array.isArray(json.data)) throw new Error(`BINGx invalid response for ${symbol}`);
+  return (json.data as any[]).map(d => ({
+    time: Number(d.time),
+    open: parseFloat(d.open),
+    high: parseFloat(d.high),
+    low: parseFloat(d.low),
+    close: parseFloat(d.close),
+  })).sort((a, b) => a.time - b.time);
 }
 
 type KillzoneSession = 'Asia' | 'London' | 'New York' | 'Off-Hours';
@@ -1552,9 +1534,159 @@ async function runIctKillzoneOpt3Strategy(symbol: string): Promise<StrategyResul
   };
 }
 
+// ════════════════════════════════════════════════════════════
+// ATM Asia Strategy (BINGx NQ-USDT)
+// ════════════════════════════════════════════════════════════
+const ATM_SYMBOL = 'NQ-USDT';
+const ATM_TICK = 0.25;
+
+function getATMTWParts(ms: number) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Taipei', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  }).formatToParts(new Date(ms));
+  const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  const h = Number(map.hour || 0), m = Number(map.minute || 0);
+  return { hour: h, minute: m, minuteOfDay: h * 60 + m, dateKey: `${map.year}-${map.month}-${map.day}` };
+}
+
+function getATMKZWindows() {
+  // Detect NY DST to determine Asia Kill Zone window
+  const nowNY = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit' }).formatToParts(new Date());
+  const nyH = Number(nowNY.find(p => p.type === 'hour')?.value || 0);
+  const utcH = new Date().getUTCHours();
+  const offset = ((nyH - utcH + 24) % 24 > 12 ? ((nyH - utcH + 24) % 24) - 24 : (nyH - utcH + 24) % 24);
+  const isWinter = offset === -5;
+  return { asiaStart: isWinter ? 7 * 60 : 6 * 60, asiaEnd: isWinter ? 8 * 60 : 7 * 60 };
+}
+
+function findATMOrderBlock(klines: any[], bias: 'LONG' | 'SHORT', sweepIdx: number) {
+  for (let i = sweepIdx; i >= Math.max(0, sweepIdx - 30); i--) {
+    const k = klines[i];
+    if (bias === 'LONG' && k.close < k.open) return { high: k.high, low: k.low, mid: (k.high + k.low) / 2 };
+    if (bias === 'SHORT' && k.close > k.open) return { high: k.high, low: k.low, mid: (k.high + k.low) / 2 };
+  }
+  return null;
+}
+
+async function runATMAsiaStrategy(): Promise<StrategyResult> {
+  const logs: string[] = ['[ATM Asia Strategy]', `標的: ${ATM_SYMBOL}`];
+
+  let klines: any[];
+  try {
+    klines = await fetchKlinesWithFallback(ATM_SYMBOL, '1m', 300);
+  } catch {
+    return { symbol: ATM_SYMBOL, time: new Date().toISOString(), regime: 'NO_DATA', price: 0, direction: 'NEUTRAL', entry_low: 0, entry_high: 0, stop: 0, target: 0, rr: 0, logs: [...logs, '⚠️ 無法取得資料'] };
+  }
+
+  const now = Date.now();
+  const nowTW = getATMTWParts(now);
+  const todayKey = nowTW.dateKey;
+  const { asiaStart, asiaEnd } = getATMKZWindows();
+
+  const todayKlines = klines.filter((k: any) => getATMTWParts(k.time).dateKey === todayKey);
+  const asiaCandles = todayKlines.filter((k: any) => {
+    const { minuteOfDay } = getATMTWParts(k.time);
+    return minuteOfDay >= asiaStart && minuteOfDay < asiaEnd;
+  });
+
+  const price = klines[klines.length - 1]?.close || 0;
+
+  if (asiaCandles.length === 0) {
+    const state: ATMState = nowTW.minuteOfDay < asiaStart ? 'IDLE' : 'ASIA_RANGE_FORMING';
+    logs.push(nowTW.minuteOfDay < asiaStart ? `等待亞洲盤 (${asiaStart / 60}:00 TW)` : '亞洲盤建立中...');
+    return {
+      symbol: ATM_SYMBOL, time: new Date().toISOString(), regime: state, price,
+      direction: 'NEUTRAL', entry_low: 0, entry_high: 0, stop: 0, target: 0, rr: 0, logs,
+      atmDetails: { state, asiaHigh: 0, asiaLow: 0, bias: null, interactionType: null, ob: null, entry: 0, sl: 0, tp1: 0, tp2: 0, checklist: { rangeFormed: false, sweepOrBreakout: false, obFound: false, displaced: false, retest: false, wickRejection: false } },
+    };
+  }
+
+  const asiaHigh = Math.max(...asiaCandles.map((k: any) => k.high));
+  const asiaLow  = Math.min(...asiaCandles.map((k: any) => k.low));
+  logs.push(`亞洲盤區間: ${asiaLow.toFixed(2)} – ${asiaHigh.toFixed(2)}`);
+
+  if (nowTW.minuteOfDay < asiaEnd) {
+    return {
+      symbol: ATM_SYMBOL, time: new Date().toISOString(), regime: 'ASIA_RANGE_FORMING', price,
+      direction: 'NEUTRAL', entry_low: 0, entry_high: 0, stop: 0, target: 0, rr: 0, logs: [...logs, '亞洲盤建立中...'],
+      atmDetails: { state: 'ASIA_RANGE_FORMING', asiaHigh, asiaLow, bias: null, interactionType: null, ob: null, entry: 0, sl: 0, tp1: 0, tp2: 0, checklist: { rangeFormed: true, sweepOrBreakout: false, obFound: false, displaced: false, retest: false, wickRejection: false } },
+    };
+  }
+
+  const postAsiaCandles = todayKlines.filter((k: any) => getATMTWParts(k.time).minuteOfDay >= asiaEnd);
+  const allCandles = [...asiaCandles, ...postAsiaCandles];
+
+  let state: ATMState = 'ASIA_RANGE_LOCKED';
+  let bias: 'LONG' | 'SHORT' | null = null;
+  let interactionType: 'SWEEP' | 'BREAKOUT' | null = null;
+  let ob: { high: number; low: number; mid: number } | null = null;
+  let displaced = false;
+  let entry = 0, sl = 0, tp1 = 0, tp2 = 0;
+
+  for (let i = asiaCandles.length; i < allCandles.length; i++) {
+    const c = allCandles[i];
+
+    if (state === 'ASIA_RANGE_LOCKED') {
+      let nb: 'LONG' | 'SHORT' | null = null;
+      let ni: 'SWEEP' | 'BREAKOUT' | null = null;
+      if (c.high > asiaHigh) { nb = c.close <= asiaHigh ? 'SHORT' : 'LONG'; ni = c.close <= asiaHigh ? 'SWEEP' : 'BREAKOUT'; }
+      else if (c.low < asiaLow) { nb = c.close >= asiaLow ? 'LONG' : 'SHORT'; ni = c.close >= asiaLow ? 'SWEEP' : 'BREAKOUT'; }
+      if (nb) {
+        const foundOB = findATMOrderBlock(allCandles, nb, i);
+        if (foundOB) { bias = nb; interactionType = ni; ob = foundOB; state = 'WAITING_RETEST'; displaced = false; logs.push(`${ni} 偵測 (${nb}), OB: ${foundOB.low.toFixed(2)}–${foundOB.high.toFixed(2)}`); }
+      }
+    } else if (state === 'WAITING_RETEST' && ob) {
+      if ((bias === 'LONG' && c.close < ob.low) || (bias === 'SHORT' && c.close > ob.high)) { state = 'ASIA_RANGE_LOCKED'; bias = null; ob = null; displaced = false; continue; }
+      if (!displaced) { if ((bias === 'LONG' && c.close > ob.high) || (bias === 'SHORT' && c.close < ob.low)) displaced = true; }
+      else if (c.low <= ob.high && c.high >= ob.low) { state = 'WAITING_WICK'; logs.push('回踩 OB 中'); }
+    } else if (state === 'WAITING_WICK' && ob) {
+      if ((bias === 'LONG' && c.close < ob.low) || (bias === 'SHORT' && c.close > ob.high)) { state = 'ASIA_RANGE_LOCKED'; bias = null; ob = null; displaced = false; continue; }
+      const bSz = Math.abs(c.close - c.open);
+      const wRej = bias === 'LONG'
+        ? (c.low <= ob.mid && c.close > ob.low && bSz > 0 && (Math.min(c.open, c.close) - c.low) > bSz * 0.5)
+        : (c.high >= ob.mid && c.close < ob.high && bSz > 0 && (c.high - Math.max(c.open, c.close)) > bSz * 0.5);
+      if (wRej) {
+        state = 'SIGNAL_FIRED';
+        entry = c.close;
+        sl   = bias === 'LONG' ? ob.low - ATM_TICK : ob.high + ATM_TICK;
+        tp1  = bias === 'LONG' ? asiaHigh : asiaLow;
+        tp2  = bias === 'LONG' ? entry + 2 * (entry - sl) : entry - 2 * (sl - entry);
+        logs.push(`🎯 訊號! Entry:${entry.toFixed(2)} SL:${sl.toFixed(2)} TP1:${tp1.toFixed(2)} TP2:${tp2.toFixed(2)}`);
+        break;
+      }
+    }
+  }
+
+  const checklist = { rangeFormed: true, sweepOrBreakout: !!bias, obFound: !!ob, displaced, retest: state === 'WAITING_WICK' || state === 'SIGNAL_FIRED', wickRejection: state === 'SIGNAL_FIRED' };
+
+  if (state === 'SIGNAL_FIRED' && bias) {
+    const rr = Math.abs(tp2 - entry) / Math.max(Math.abs(entry - sl), 0.01);
+    return {
+      symbol: ATM_SYMBOL, time: new Date().toISOString(),
+      regime: `ATM_${interactionType}_${bias}`, price, direction: bias,
+      entry_low: entry, entry_high: entry, stop: sl, target: tp2, rr, logs,
+      atmDetails: { state: 'SIGNAL_FIRED', asiaHigh, asiaLow, bias, interactionType, ob, entry, sl, tp1, tp2, checklist },
+    };
+  }
+
+  const stateLabels: Record<ATMState, string> = { IDLE: '等待', ASIA_RANGE_FORMING: '亞洲盤建立中', ASIA_RANGE_LOCKED: '區間鎖定，等待互動', WAITING_RETEST: `OB 等待回踩 (${bias || ''})`, WAITING_WICK: '等待影線拒絕', SIGNAL_FIRED: '訊號已觸發' };
+  logs.push(`狀態: ${stateLabels[state]}`);
+
+  return {
+    symbol: ATM_SYMBOL, time: new Date().toISOString(),
+    regime: `ATM_${state}`, price, direction: 'NEUTRAL',
+    entry_low: ob?.low || 0, entry_high: ob?.high || 0, stop: 0, target: 0, rr: 0, logs,
+    atmDetails: { state, asiaHigh, asiaLow, bias, interactionType, ob, entry: 0, sl: 0, tp1: bias === 'LONG' ? asiaHigh : (asiaLow || 0), tp2: 0, checklist },
+  };
+}
+
 export async function runStrategy(symbol: string, strategyId: string = 'ms_ob'): Promise<StrategyResult> {
   try {
-    if (strategyId === 'structural_reversal') {
+    if (strategyId === 'atm_asia') {
+      return await runATMAsiaStrategy();
+    } else if (strategyId === 'structural_reversal') {
       return await runStructuralReversalStrategy(symbol);
     } else if (strategyId === 'smc_session') {
       return await runSMCStrategy(symbol);

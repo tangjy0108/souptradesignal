@@ -83,6 +83,7 @@ const CandlestickShape = (props: any) => {
 
 // ── Constants ──
 const SYMBOLS = [
+  'NQ-USDT',
   'BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','ADAUSDT','DOGEUSDT',
   'XRPUSDT','DOTUSDT','LINKUSDT','AVAXUSDT','LTCUSDT','UNIUSDT',
   'ATOMUSDT','ETCUSDT','XLMUSDT','ALGOUSDT','FILUSDT','NEARUSDT',
@@ -99,6 +100,7 @@ const INTERVALS = [
 ];
 
 const STRATEGIES = [
+  { id: 'atm_asia',            name: 'ATM 亞洲盤 (NQ-USDT)'  },
   { id: 'ms_ob',               name: 'Market Structure + OB'  },
   { id: 'structural_reversal', name: 'Structural Reversal (PRZ)' },
   { id: 'smc_session',         name: 'SMC Rolling Session'    },
@@ -188,6 +190,7 @@ type ReviewSummary = {
 };
 
 const STRATEGY_SHORT_LABELS: Record<string, string> = {
+  atm_asia: 'ATM',
   ms_ob: 'MS+OB',
   structural_reversal: 'PRZ',
   smc_session: 'SMC',
@@ -1002,15 +1005,19 @@ export default function App() {
   useEffect(() => { try { localStorage.setItem(SIGNAL_FEED_KEY, JSON.stringify(signalFeed)); } catch {} }, [signalFeed]);
   useEffect(() => { try { localStorage.setItem(S5_OVERLAY_KEY, JSON.stringify(showS5Overlay)); } catch {} }, [showS5Overlay]);
 
-  // Fetch all Binance USDT pairs
+  // Fetch all BINGx perpetual contracts
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch('https://data-api.binance.vision/api/v3/ticker/price');
+        const res = await fetch('https://open-api.bingx.com/openApi/swap/v2/quote/contracts');
         if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data)) {
-            const syms = data.filter((s: any) => s.symbol?.endsWith('USDT')).map((s: any) => s.symbol);
+          const json = await res.json();
+          if (json.code === 0 && Array.isArray(json.data)) {
+            // BINGx symbols: BTC-USDT → BTCUSDT (for display compat), keep NQ-USDT as-is
+            const syms = json.data
+              .map((s: any) => s.symbol as string)
+              .filter((s: string) => s.endsWith('-USDT'))
+              .map((s: string) => s === 'NQ-USDT' ? s : s.replace('-USDT', 'USDT'));
             if (syms.length > 0) setAvailableSymbols(Array.from(new Set([...SYMBOLS, ...syms])));
           }
         }
@@ -1206,7 +1213,11 @@ export default function App() {
         strategyResult.killzoneDetails?.orHigh, strategyResult.killzoneDetails?.orLow,
         strategyResult.killzoneDetails?.mssLevel, strategyResult.killzoneDetails?.sweepLevel,
         strategyResult.killzoneDetails?.sweepExtreme, strategyResult.killzoneDetails?.fvgLow,
-        strategyResult.killzoneDetails?.fvgHigh].filter(v => typeof v === 'number' && v > 0) as number[];
+        strategyResult.killzoneDetails?.fvgHigh,
+        strategyResult.atmDetails?.asiaHigh, strategyResult.atmDetails?.asiaLow,
+        strategyResult.atmDetails?.ob?.high, strategyResult.atmDetails?.ob?.low,
+        strategyResult.atmDetails?.tp1, strategyResult.atmDetails?.tp2,
+        strategyResult.atmDetails?.sl].filter(v => typeof v === 'number' && v > 0) as number[];
       if (vals.length) { min = Math.min(min, ...vals); max = Math.max(max, ...vals); }
     }
     if (showSR) {
@@ -1454,23 +1465,27 @@ export default function App() {
         setHarmonicPatterns(patchedPatterns);
         setStrategyResult(null);
       } else if (strategyId === 'snr_fvg') {
-        const res = await fetch(`https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=15m&limit=200`);
+        // Use BINGx for SNR/FVG klines
+        const bingxSym = symbol.includes('-') ? symbol : (symbol.endsWith('USDT') ? symbol.slice(0, -4) + '-USDT' : symbol);
+        const res = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/klines?symbol=${encodeURIComponent(bingxSym)}&interval=15m&limit=200`);
         if (res.ok) {
-          const raw = await res.json();
-          const klines = raw.map((k: any) => ({
-            open: parseFloat(k[1]), high: parseFloat(k[2]),
-            low: parseFloat(k[3]), close: parseFloat(k[4]),
-            volume: parseFloat(k[5]),
-          }));
-          const snrP = chartPreset?.snrLqP;
-          const result = detectSNRFVG(
-            klines,
-            snrP?.snrStrength ?? 15,
-            snrP?.fvgMinSizePct ?? 0.05,
-            snrP?.volumeThreshold ?? 1.1,
-            snrP?.signalGap ?? 3,
-          );
-          setSnrFvgResult(result);
+          const json = await res.json();
+          if (json.code === 0 && Array.isArray(json.data)) {
+            const klines = json.data.map((k: any) => ({
+              open: parseFloat(k.open), high: parseFloat(k.high),
+              low: parseFloat(k.low), close: parseFloat(k.close),
+              volume: parseFloat(k.volume || 0),
+            }));
+            const snrP = chartPreset?.snrLqP;
+            const result = detectSNRFVG(
+              klines,
+              snrP?.snrStrength ?? 15,
+              snrP?.fvgMinSizePct ?? 0.05,
+              snrP?.volumeThreshold ?? 1.1,
+              snrP?.signalGap ?? 3,
+            );
+            setSnrFvgResult(result);
+          }
         }
         setStrategyResult(null);
       } else {
@@ -1495,27 +1510,28 @@ export default function App() {
     setIsScanning(true);
     setScanResults([]);
     const results: { symbol: string; pattern: HarmonicPattern }[] = [];
+    const toBx = (s: string) => s.includes('-') ? s : (s.endsWith('USDT') ? s.slice(0, -4) + '-USDT' : s);
     for (const sym of symbols) {
       try {
-        const res = await fetch(`https://data-api.binance.vision/api/v3/klines?symbol=${sym}&interval=15m&limit=150`);
+        const bxSym = toBx(sym);
+        const res = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/klines?symbol=${encodeURIComponent(bxSym)}&interval=15m&limit=150`);
         if (!res.ok) continue;
-        const raw = await res.json();
-        if (!Array.isArray(raw) || raw.length < 50) continue;
-        const klines = raw.map((k: any) => ({
-          open: parseFloat(k[1]), high: parseFloat(k[2]),
-          low: parseFloat(k[3]), close: parseFloat(k[4]),
+        const json = await res.json();
+        if (json.code !== 0 || !Array.isArray(json.data) || json.data.length < 50) continue;
+        const klines = json.data.map((k: any) => ({
+          open: parseFloat(k.open), high: parseFloat(k.high),
+          low: parseFloat(k.low), close: parseFloat(k.close),
         }));
-        const closes = klines.map(k => k.close);
+        const closes = klines.map((k: any) => k.close);
         const rsiArr = calculateRSI(closes, 14);
         const patterns = detectHarmonics(klines, rsiArr.length === klines.length ? rsiArr : undefined);
         if (patterns.length > 0) {
-          // 掃描也用多時框架背離加分（同時拿 1H K 線做簡易背離判斷）
-          const res1h = await fetch(`https://data-api.binance.vision/api/v3/klines?symbol=${sym}&interval=1h&limit=50`).catch(() => null);
+          const res1h = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/klines?symbol=${encodeURIComponent(bxSym)}&interval=1h&limit=50`).catch(() => null);
           let divConfirmed = false;
           if (res1h?.ok) {
-            const raw1h = await res1h.json().catch(() => []);
-            if (Array.isArray(raw1h) && raw1h.length >= 20) {
-              const closes1h = raw1h.map((k: any) => parseFloat(k[4]));
+            const json1h = await res1h.json().catch(() => null);
+            if (json1h?.code === 0 && Array.isArray(json1h.data) && json1h.data.length >= 20) {
+              const closes1h = json1h.data.map((k: any) => parseFloat(k.close));
               const rsi1h = calculateRSI(closes1h, 14);
               const lastRsi = rsi1h[rsi1h.length - 1];
               const prevRsi = rsi1h[rsi1h.length - 6];
@@ -2322,6 +2338,46 @@ export default function App() {
                     )}
                   </div>
                 )}
+                {strategyResult.atmDetails && (
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                        strategyResult.atmDetails.state === 'SIGNAL_FIRED' ? 'bg-[#089981]/15 text-[#089981]' :
+                        strategyResult.atmDetails.state === 'WAITING_WICK' ? 'bg-[#FFC107]/15 text-[#FFC107]' :
+                        strategyResult.atmDetails.state === 'WAITING_RETEST' ? 'bg-[#2962FF]/15 text-[#7EA6FF]' :
+                        'bg-[#787B86]/15 text-[#9CA3AF]'
+                      }`}>{strategyResult.atmDetails.state.replace(/_/g, ' ')}</span>
+                      {strategyResult.atmDetails.bias && (
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${strategyResult.atmDetails.bias === 'LONG' ? 'bg-[#089981]/10 text-[#089981]' : 'bg-[#F23645]/10 text-[#F23645]'}`}>
+                          {strategyResult.atmDetails.bias}
+                        </span>
+                      )}
+                      {strategyResult.atmDetails.interactionType && (
+                        <span className="px-1.5 py-0.5 rounded bg-[#A855F7]/10 text-[#C084FC] text-[10px]">{strategyResult.atmDetails.interactionType}</span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-1 text-[10px]">
+                      {Object.entries(strategyResult.atmDetails.checklist).map(([k, v]) => (
+                        <span key={k} className={v ? 'text-[#089981]' : 'text-[#787B86]'}>
+                          {v ? '☑' : '⬜'} {k.replace(/([A-Z])/g, ' $1').toLowerCase()}
+                        </span>
+                      ))}
+                    </div>
+                    {strategyResult.atmDetails.asiaHigh > 0 && (
+                      <div className="text-[10px] text-[#14B8A6]">
+                        Asia: {strategyResult.atmDetails.asiaLow.toFixed(2)} – {strategyResult.atmDetails.asiaHigh.toFixed(2)}
+                      </div>
+                    )}
+                    {strategyResult.atmDetails.state === 'SIGNAL_FIRED' && strategyResult.atmDetails.tp1 > 0 && (
+                      <div className="grid grid-cols-2 gap-1 text-[10px]">
+                        <span className="text-[#787B86]">TP1 (Asia)</span>
+                        <span className="text-[#FFC107] font-mono text-right">{strategyResult.atmDetails.tp1.toFixed(2)}</span>
+                        <span className="text-[#787B86]">TP2 (1:2 R/R)</span>
+                        <span className="text-[#089981] font-mono text-right">{strategyResult.atmDetails.tp2.toFixed(2)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             <div className="h-px bg-[#2A2E39]" />
@@ -2819,6 +2875,36 @@ export default function App() {
                     {strategyResult?.killzoneDetails?.fvgLow > 0 && strategyResult?.killzoneDetails?.fvgHigh > 0 && (
                       <ReferenceArea y1={strategyResult.killzoneDetails.fvgLow} y2={strategyResult.killzoneDetails.fvgHigh}
                         {...({ fill: strategyResult.direction === 'LONG' ? '#2962FF' : '#A855F7', fillOpacity: 0.16, stroke: strategyResult.direction === 'LONG' ? '#2962FF' : '#A855F7', strokeWidth: 1, strokeDasharray: '3 3' } as any)} />
+                    )}
+
+                    {/* ATM Asia Overlays */}
+                    {strategyResult?.atmDetails?.asiaHigh > 0 && (
+                      <ReferenceArea y1={strategyResult.atmDetails.asiaLow} y2={strategyResult.atmDetails.asiaHigh}
+                        {...({ fill: '#14B8A6', fillOpacity: 0.06, stroke: '#14B8A6', strokeWidth: 1, strokeDasharray: '4 4', strokeOpacity: 0.5 } as any)} />
+                    )}
+                    {strategyResult?.atmDetails?.asiaHigh > 0 && (
+                      <ReferenceLine y={strategyResult.atmDetails.asiaHigh} stroke="#14B8A6" strokeDasharray="4 4" strokeWidth={1.5}
+                        label={{ position: 'insideTopLeft', value: 'Asia High', fill: '#14B8A6', fontSize: 11, fontWeight: 600 }} />
+                    )}
+                    {strategyResult?.atmDetails?.asiaLow > 0 && (
+                      <ReferenceLine y={strategyResult.atmDetails.asiaLow} stroke="#14B8A6" strokeDasharray="4 4" strokeWidth={1.5}
+                        label={{ position: 'insideBottomLeft', value: 'Asia Low', fill: '#14B8A6', fontSize: 11, fontWeight: 600 }} />
+                    )}
+                    {strategyResult?.atmDetails?.ob && (
+                      <ReferenceArea y1={strategyResult.atmDetails.ob.low} y2={strategyResult.atmDetails.ob.high}
+                        {...({ fill: strategyResult.atmDetails.bias === 'LONG' ? '#089981' : '#F23645', fillOpacity: 0.25, stroke: strategyResult.atmDetails.bias === 'LONG' ? '#089981' : '#F23645', strokeWidth: 1.5 } as any)} />
+                    )}
+                    {strategyResult?.atmDetails?.state === 'SIGNAL_FIRED' && strategyResult.atmDetails.tp1 > 0 && (
+                      <ReferenceLine y={strategyResult.atmDetails.tp1} stroke="#FFC107" strokeDasharray="6 3" strokeWidth={1.5}
+                        label={{ position: 'insideTopLeft', value: 'TP1', fill: '#FFC107', fontSize: 11, fontWeight: 600 }} />
+                    )}
+                    {strategyResult?.atmDetails?.state === 'SIGNAL_FIRED' && strategyResult.atmDetails.tp2 > 0 && (
+                      <ReferenceLine y={strategyResult.atmDetails.tp2} stroke="#089981" strokeDasharray="4 4" strokeWidth={2}
+                        label={{ position: 'insideTopLeft', value: 'TP2 (1:2)', fill: '#089981', fontSize: 12, fontWeight: 700 }} />
+                    )}
+                    {strategyResult?.atmDetails?.state === 'SIGNAL_FIRED' && strategyResult.atmDetails.sl > 0 && (
+                      <ReferenceLine y={strategyResult.atmDetails.sl} stroke="#F23645" strokeDasharray="4 4" strokeWidth={1.5}
+                        label={{ position: 'insideBottomLeft', value: 'SL', fill: '#F23645', fontSize: 11, fontWeight: 600 }} />
                     )}
 
                     {/* BB */}

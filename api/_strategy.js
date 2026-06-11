@@ -1,23 +1,47 @@
-async function fetchFutures(symbol, interval, limit = 200) {
-  try {
-    const res = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
-    if (!res.ok) return null;
-    return (await res.json()).map(d => ({ time: d[0], open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]), volume: parseFloat(d[5]) }));
-  } catch (_) { return null; }
-}
+// BINGx API base
+const BINGX_BASE = 'https://open-api.bingx.com/openApi/swap/v2/quote';
 
-async function fetchSpot(symbol, interval, limit = 200) {
-  for (const base of ['https://data-api.binance.vision', 'https://api.binance.com']) {
-    try {
-      const res = await fetch(`${base}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
-      if (res.ok) return (await res.json()).map(d => ({ time: d[0], open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]), volume: parseFloat(d[5]) }));
-    } catch (_) {}
-  }
-  return null;
+// Convert Binance-style symbol (BTCUSDT) to BINGx style (BTC-USDT)
+function toBingxSymbol(symbol) {
+  if (symbol.includes('-')) return symbol; // already BINGx format
+  if (symbol.endsWith('USDT')) return symbol.slice(0, -4) + '-USDT';
+  return symbol;
 }
 
 export async function fetchKlines(symbol, interval, limit = 200) {
-  return (await fetchFutures(symbol, interval, limit)) ?? (await fetchSpot(symbol, interval, limit));
+  const bingxSym = toBingxSymbol(symbol);
+  try {
+    const url = `${BINGX_BASE}/klines?symbol=${encodeURIComponent(bingxSym)}&interval=${interval}&limit=${limit}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (json.code !== 0 || !Array.isArray(json.data)) return null;
+    return json.data.map(d => ({
+      time: Number(d.time),
+      open: parseFloat(d.open),
+      high: parseFloat(d.high),
+      low: parseFloat(d.low),
+      close: parseFloat(d.close),
+      volume: parseFloat(d.volume || 0),
+    })).sort((a, b) => a.time - b.time);
+  } catch (_) {
+    return null;
+  }
+}
+
+export async function fetchLatestPriceBingx(symbol) {
+  const bingxSym = toBingxSymbol(symbol);
+  try {
+    const url = `${BINGX_BASE}/price?symbol=${encodeURIComponent(bingxSym)}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (json.code !== 0 || !json.data) return null;
+    const price = parseFloat(json.data.price);
+    return isFinite(price) && price > 0 ? price : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function calcEMA(data, period) {
@@ -189,14 +213,14 @@ async function runSMC(symbol) {
   return { symbol, strategy: `SMC (${sessionTarget} Session)`, price, direction, regime, entry_low, entry_high, stop, target: priceTarget, rr };
 }
 
-// ── 多數決掃描：至少 2 個同方向才發 ──
+// ── Scan symbols (keep Binance-format for display, converted to BINGx at fetch time) ──
 export const SCAN_SYMBOLS = [
   'BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT',
   'DOGEUSDT','ADAUSDT','AVAXUSDT','LINKUSDT','LTCUSDT',
   'DOTUSDT','UNIUSDT','ATOMUSDT','NEARUSDT','AAVEUSDT',
 ];
 
-// ── RSI 計算 ──
+// ── RSI ──
 export function calcRSI(closes, period = 14) {
   const rsi = new Array(closes.length).fill(null);
   if (closes.length < period + 1) return rsi;
@@ -219,7 +243,6 @@ export function calcRSI(closes, period = 14) {
 }
 
 // ── RSI 背離偵測 ──
-// 回傳 'CONFIRMED_BULL' | 'CONFIRMED_BEAR' | 'WARNING_BULL' | 'WARNING_BEAR' | null
 export function detectRSIDivergence(klines) {
   if (klines.length < 30) return null;
   const closes = klines.map(k => k.close);
@@ -227,8 +250,6 @@ export function detectRSIDivergence(klines) {
   const lows   = klines.map(k => k.low);
   const rsi    = calcRSI(closes, 14);
   const n = klines.length;
-
-  // 找最近兩個擺動低點（看多背離）
   const swingLowIdxs = [];
   for (let i = 3; i < n - 3; i++) {
     if (lows[i] < lows[i-1] && lows[i] < lows[i-2] && lows[i] < lows[i+1] && lows[i] < lows[i+2])
@@ -237,16 +258,11 @@ export function detectRSIDivergence(klines) {
   if (swingLowIdxs.length >= 2) {
     const i1 = swingLowIdxs[swingLowIdxs.length - 2];
     const i2 = swingLowIdxs[swingLowIdxs.length - 1];
-    const priceMakesLowerLow = lows[i2] < lows[i1];
-    const rsiMakesHigherLow  = rsi[i2] !== null && rsi[i1] !== null && rsi[i2] > rsi[i1];
-    if (priceMakesLowerLow && rsiMakesHigherLow) {
-      // RSI 是否已勾頭（最新RSI > 前一根）
+    if (lows[i2] < lows[i1] && rsi[i2] !== null && rsi[i1] !== null && rsi[i2] > rsi[i1]) {
       const rsiHooked = rsi[n-1] !== null && rsi[n-2] !== null && rsi[n-1] > rsi[n-2];
       return rsiHooked ? 'CONFIRMED_BULL' : 'WARNING_BULL';
     }
   }
-
-  // 找最近兩個擺動高點（看空背離）
   const swingHighIdxs = [];
   for (let i = 3; i < n - 3; i++) {
     if (highs[i] > highs[i-1] && highs[i] > highs[i-2] && highs[i] > highs[i+1] && highs[i] > highs[i+2])
@@ -255,163 +271,90 @@ export function detectRSIDivergence(klines) {
   if (swingHighIdxs.length >= 2) {
     const i1 = swingHighIdxs[swingHighIdxs.length - 2];
     const i2 = swingHighIdxs[swingHighIdxs.length - 1];
-    const priceMakesHigherHigh = highs[i2] > highs[i1];
-    const rsiMakesLowerHigh    = rsi[i2] !== null && rsi[i1] !== null && rsi[i2] < rsi[i1];
-    if (priceMakesHigherHigh && rsiMakesLowerHigh) {
+    if (highs[i2] > highs[i1] && rsi[i2] !== null && rsi[i1] !== null && rsi[i2] < rsi[i1]) {
       const rsiHooked = rsi[n-1] !== null && rsi[n-2] !== null && rsi[n-1] < rsi[n-2];
       return rsiHooked ? 'CONFIRMED_BEAR' : 'WARNING_BEAR';
     }
   }
-
   return null;
 }
 
-// ── 反轉K棒識別 ──
 function detectReversalCandle(klines, rsiValues) {
   const n = klines.length;
   if (n < 3) return null;
-  const c  = klines[n - 1]; // 最新K
-  const p  = klines[n - 2]; // 前一根K
-  const pp = klines[n - 3]; // 前兩根K
+  const c  = klines[n - 1];
+  const p  = klines[n - 2];
+  const pp = klines[n - 3];
   const rsi = rsiValues[n - 1] || 50;
-
   const cBody  = Math.abs(c.close - c.open);
   const cRange = c.high - c.low;
   const pBody  = Math.abs(p.close - p.open);
-
-  // 看多K棒（RSI < 45 才算）
   if (rsi < 45) {
-    // 錘頭 Hammer
     const lowerWick = Math.min(c.open, c.close) - c.low;
     const upperWick = c.high - Math.max(c.open, c.close);
-    if (c.close > c.open && lowerWick > cBody * 2 && upperWick < cBody * 0.5)
-      return 'HAMMER';
-
-    // 看多吞噬 Bullish Engulfing
-    if (c.close > c.open && p.close < p.open &&
-        c.open < p.close && c.close > p.open)
-      return 'BULL_ENGULFING';
-
-    // 晨星 Morning Star
-    if (pp.close < pp.open &&
-        Math.abs(p.close - p.open) < (p.high - p.low) * 0.3 &&
-        c.close > c.open && c.close > (pp.open + pp.close) / 2)
-      return 'MORNING_STAR';
+    if (c.close > c.open && lowerWick > cBody * 2 && upperWick < cBody * 0.5) return 'HAMMER';
+    if (c.close > c.open && p.close < p.open && c.open < p.close && c.close > p.open) return 'BULL_ENGULFING';
+    if (pp.close < pp.open && Math.abs(p.close - p.open) < (p.high - p.low) * 0.3 && c.close > c.open && c.close > (pp.open + pp.close) / 2) return 'MORNING_STAR';
   }
-
-  // 看空K棒（RSI > 55 才算）
   if (rsi > 55) {
-    // 射擊之星 Shooting Star
     const upperWick = c.high - Math.max(c.open, c.close);
     const lowerWick = Math.min(c.open, c.close) - c.low;
-    if (c.close < c.open && upperWick > cBody * 2 && lowerWick < cBody * 0.5)
-      return 'SHOOTING_STAR';
-
-    // 看空吞噬 Bearish Engulfing
-    if (c.close < c.open && p.close > p.open &&
-        c.open > p.close && c.close < p.open)
-      return 'BEAR_ENGULFING';
-
-    // 暮星 Evening Star
-    if (pp.close > pp.open &&
-        Math.abs(p.close - p.open) < (p.high - p.low) * 0.3 &&
-        c.close < c.open && c.close < (pp.open + pp.close) / 2)
-      return 'EVENING_STAR';
+    if (c.close < c.open && upperWick > cBody * 2 && lowerWick < cBody * 0.5) return 'SHOOTING_STAR';
+    if (c.close < c.open && p.close > p.open && c.open > p.close && c.close < p.open) return 'BEAR_ENGULFING';
+    if (pp.close > pp.open && Math.abs(p.close - p.open) < (p.high - p.low) * 0.3 && c.close < c.open && c.close < (pp.open + pp.close) / 2) return 'EVENING_STAR';
   }
-
   return null;
 }
 
-// ── 信號分級 ──
 function gradeSignal(signal, divergence15m, divergence1h, divergence4h, reversalCandle) {
   const dir = signal.direction;
-  const divMatch = (div) => div && (
-    (dir === 'LONG'  && (div === 'CONFIRMED_BULL' || div === 'WARNING_BULL')) ||
-    (dir === 'SHORT' && (div === 'CONFIRMED_BEAR' || div === 'WARNING_BEAR'))
-  );
-  const divConfirmed = (div) => div && (
-    (dir === 'LONG'  && div === 'CONFIRMED_BULL') ||
-    (dir === 'SHORT' && div === 'CONFIRMED_BEAR')
-  );
+  const divMatch = (div) => div && ((dir === 'LONG' && (div === 'CONFIRMED_BULL' || div === 'WARNING_BULL')) || (dir === 'SHORT' && (div === 'CONFIRMED_BEAR' || div === 'WARNING_BEAR')));
+  const divConfirmed = (div) => div && ((dir === 'LONG' && div === 'CONFIRMED_BULL') || (dir === 'SHORT' && div === 'CONFIRMED_BEAR'));
   const bullishCandle = ['HAMMER', 'BULL_ENGULFING', 'MORNING_STAR'].includes(reversalCandle);
   const bearishCandle = ['SHOOTING_STAR', 'BEAR_ENGULFING', 'EVENING_STAR'].includes(reversalCandle);
   const candleMatch = (dir === 'LONG' && bullishCandle) || (dir === 'SHORT' && bearishCandle);
-
-  const has4hConfirmed = divConfirmed(divergence4h);
-  const has1hConfirmed = divConfirmed(divergence1h);
-  const has15mConfirmed = divConfirmed(divergence15m);
-  const hasAnyWarning = divMatch(divergence15m) || divMatch(divergence1h) || divMatch(divergence4h);
-
-  if ((has4hConfirmed || has1hConfirmed) && candleMatch) return 'A';
-  if (has4hConfirmed || (has1hConfirmed && candleMatch)) return 'A';
-  if (has1hConfirmed || has15mConfirmed) return 'B';
-  if (hasAnyWarning) return 'B-';
+  if ((divConfirmed(divergence4h) || divConfirmed(divergence1h)) && candleMatch) return 'A';
+  if (divConfirmed(divergence4h) || (divConfirmed(divergence1h) && candleMatch)) return 'A';
+  if (divConfirmed(divergence1h) || divConfirmed(divergence15m)) return 'B';
+  if (divMatch(divergence15m) || divMatch(divergence1h) || divMatch(divergence4h)) return 'B-';
   return 'C';
 }
 
 export async function runStrategyScan() {
   const results = [];
-
   for (let i = 0; i < SCAN_SYMBOLS.length; i += 3) {
     const batch = SCAN_SYMBOLS.slice(i, i + 3);
     await Promise.all(batch.map(async sym => {
-      // 同時跑三個策略 + 抓三個時框的 K 線做背離/反轉K棒
       const [r1, r2, r3, k15m, k1h, k4h] = await Promise.allSettled([
-        runMSOB(sym),
-        runPRZ(sym),
-        runSMC(sym),
+        runMSOB(sym), runPRZ(sym), runSMC(sym),
         fetchKlines(sym, '15m', 100),
         fetchKlines(sym, '1h',  100),
         fetchKlines(sym, '4h',  100),
       ]);
-
-      const signals = [r1, r2, r3]
-        .filter(r => r.status === 'fulfilled' && r.value)
-        .map(r => r.value);
-
+      const signals = [r1, r2, r3].filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
       const longs  = signals.filter(s => s.direction === 'LONG');
       const shorts = signals.filter(s => s.direction === 'SHORT');
       const majority = longs.length >= shorts.length ? longs : shorts;
-
-      // 至少 2 個同方向才繼續
       if (majority.length < 2) return;
-
-      // 計算背離
       const klines15m = k15m.status === 'fulfilled' ? k15m.value : null;
       const klines1h  = k1h.status  === 'fulfilled' ? k1h.value  : null;
       const klines4h  = k4h.status  === 'fulfilled' ? k4h.value  : null;
-
       const div15m = klines15m ? detectRSIDivergence(klines15m) : null;
       const div1h  = klines1h  ? detectRSIDivergence(klines1h)  : null;
       const div4h  = klines4h  ? detectRSIDivergence(klines4h)  : null;
-
-      // 反轉K棒（用 15m）
       let reversalCandle = null;
       if (klines15m) {
         const rsi15m = calcRSI(klines15m.map(k => k.close), 14);
         reversalCandle = detectReversalCandle(klines15m, rsi15m);
       }
-
       const best = majority.reduce((a, b) => a.rr > b.rr ? a : b);
       const agreeing = majority.map(s => s.strategy).join(' + ');
       const star = majority.length === 3 ? ' ⭐' : '';
       const grade = gradeSignal(best, div15m, div1h, div4h, reversalCandle);
-
-      // C 級不發
       if (grade === 'C') return;
-
-      results.push({
-        ...best,
-        strategy: agreeing + star,
-        strength: majority.length,
-        grade,
-        divergence: { '15m': div15m, '1h': div1h, '4h': div4h },
-        reversalCandle,
-      });
+      results.push({ ...best, strategy: agreeing + star, strength: majority.length, grade, divergence: { '15m': div15m, '1h': div1h, '4h': div4h }, reversalCandle });
     }));
     if (i + 3 < SCAN_SYMBOLS.length) await new Promise(r => setTimeout(r, 400));
   }
-
   return results;
 }
-

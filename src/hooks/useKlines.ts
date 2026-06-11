@@ -9,81 +9,53 @@ export type Kline = {
   volume: number;
 };
 
-async function fetchWithTimeout(url: string, timeout = 4000) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(id);
-    return res;
-  } catch (e) {
-    clearTimeout(id);
-    throw e;
-  }
+const BINGX_BASE = 'https://open-api.bingx.com/openApi/swap/v2/quote';
+
+// Convert symbol to BINGx format: BTCUSDT → BTC-USDT, NQ-USDT stays as-is
+function toBingxSymbol(symbol: string): string {
+  if (symbol.includes('-')) return symbol;
+  if (symbol.endsWith('USDT')) return symbol.slice(0, -4) + '-USDT';
+  return symbol;
 }
 
-async function fetchFutures(symbol: string, interval: string, limit: number): Promise<Kline[] | null> {
+async function fetchBingxKlines(symbol: string, interval: string, limit: number): Promise<Kline[] | null> {
+  const bingxSym = toBingxSymbol(symbol);
   try {
-    const res = await fetchWithTimeout(
-      `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
-    );
+    const url = `${BINGX_BASE}/klines?symbol=${encodeURIComponent(bingxSym)}&interval=${interval}&limit=${limit}`;
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(id);
     if (!res.ok) return null;
     const json = await res.json();
-    return json.map((d: any) => ({
-      time: d[0], open: parseFloat(d[1]), high: parseFloat(d[2]),
-      low: parseFloat(d[3]), close: parseFloat(d[4]), volume: parseFloat(d[5]),
-    }));
+    if (json.code !== 0 || !Array.isArray(json.data)) return null;
+    return (json.data as any[]).map(d => ({
+      time: Number(d.time),
+      open: parseFloat(d.open),
+      high: parseFloat(d.high),
+      low: parseFloat(d.low),
+      close: parseFloat(d.close),
+      volume: parseFloat(d.volume || 0),
+    })).sort((a, b) => a.time - b.time);
   } catch (_) {
     return null;
   }
-}
-
-async function fetchSpot(symbol: string, interval: string, limit: number): Promise<Kline[] | null> {
-  const urls = [
-    `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-    `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-    `https://api1.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-  ];
-  for (const url of urls) {
-    try {
-      const res = await fetchWithTimeout(url, 3000);
-      if (res.ok) {
-        const json = await res.json();
-        return json.map((d: any) => ({
-          time: d[0], open: parseFloat(d[1]), high: parseFloat(d[2]),
-          low: parseFloat(d[3]), close: parseFloat(d[4]), volume: parseFloat(d[5]),
-        }));
-      }
-      if (res.status === 400) throw new Error(`Invalid symbol: ${symbol}`);
-    } catch (e: any) {
-      if (e.message?.includes('Invalid symbol')) throw e;
-    }
-  }
-  return null;
 }
 
 export function useKlines(symbol: string, interval: string, limit = 150) {
   const [data, setData]       = useState<Kline[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState<string | null>(null);
-  const [isFutures, setIsFutures] = useState(false);
+  const [isFutures, setIsFutures] = useState(true); // BINGx is always perpetual
 
   useEffect(() => {
     let isMounted = true;
     const run = async () => {
       setLoading(true); setError(null);
       try {
-        // Try futures first
-        let klines = await fetchFutures(symbol, interval, limit);
-        let futures = false;
-        if (klines) {
-          futures = true;
-        } else {
-          // Fallback to spot
-          klines = await fetchSpot(symbol, interval, limit);
-        }
-        if (!klines) throw new Error(`無法取得 ${symbol} 資料`);
-        if (isMounted) { setData(klines); setIsFutures(futures); }
+        const klines = await fetchBingxKlines(symbol, interval, limit);
+        if (!klines || klines.length === 0) throw new Error(`無法取得 ${symbol} 資料`);
+        if (isMounted) { setData(klines); setIsFutures(true); }
       } catch (e: any) {
         if (isMounted) setError(e.message);
       } finally {

@@ -1,4 +1,5 @@
-import { fetchKlines, SCAN_SYMBOLS } from './_strategy.js';
+import { fetchKlines, SCAN_SYMBOLS, fetchLatestPriceBingx } from './_strategy.js';
+import { runATMScan, buildATMTelegramMessage, ATM_SYMBOL } from './_atmStrategy.js';
 import { listOpenSignals, listSignalsByKeys, updateSignalStatuses, upsertSignalsWithMeta } from './_signalStore.js';
 import { sendTelegram } from './_telegram.js';
 
@@ -368,25 +369,7 @@ async function persistKillzoneSignals(signals, updatedAt = new Date().toISOStrin
 }
 
 async function fetchLatestPrice(symbol) {
-  const endpoints = [
-    `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`,
-    `https://data-api.binance.vision/api/v3/ticker/price?symbol=${symbol}`,
-    `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`,
-  ];
-
-  for (const endpoint of endpoints) {
-    try {
-      const response = await fetch(endpoint);
-      if (!response.ok) continue;
-      const json = await response.json();
-      const price = Number(json?.price);
-      if (Number.isFinite(price) && price > 0) {
-        return price;
-      }
-    } catch (_) {}
-  }
-
-  return null;
+  return fetchLatestPriceBingx(symbol);
 }
 
 async function syncOpenSignalStatuses(now = new Date()) {
@@ -863,6 +846,19 @@ export default async function handler(req, res) {
       await safeSendTelegram(msg, sendErrors, 'tpsl');
     }
 
+    // ── ATM Asia Strategy Scan ──
+    let atmSignal = null;
+    try {
+      const atmResult = await runATMScan();
+      if (atmResult.signal) {
+        atmSignal = atmResult.signal;
+        const atmMsg = buildATMTelegramMessage(atmResult.signal, twTime);
+        if (atmMsg) await safeSendTelegram(atmMsg, sendErrors, 'atm');
+      }
+    } catch (atmErr) {
+      console.error('ATM scan error:', atmErr);
+    }
+
     let killzoneSignals = [];
     let persistedKillzoneSignals = [];
     let sessionLiquiditySignals = [];
@@ -981,6 +977,7 @@ export default async function handler(req, res) {
         closeOutcome: event.closeOutcome,
       })),
       sendErrors,
+      atm: atmSignal ? { stage: atmSignal.stage, type: atmSignal.type, bias: atmSignal.bias } : null,
     });
   } catch (err) {
     console.error('Cron error:', err);
