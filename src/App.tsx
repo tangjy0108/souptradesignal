@@ -83,7 +83,7 @@ const CandlestickShape = (props: any) => {
 
 // ── Constants ──
 const SYMBOLS = [
-  'NQ-USDT',
+  'NASDAQ100-USDT',
   'BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','ADAUSDT','DOGEUSDT',
   'XRPUSDT','DOTUSDT','LINKUSDT','AVAXUSDT','LTCUSDT','UNIUSDT',
   'ATOMUSDT','ETCUSDT','XLMUSDT','ALGOUSDT','FILUSDT','NEARUSDT',
@@ -108,7 +108,7 @@ function klinesLimit(iv: string): number {
 }
 
 const STRATEGIES = [
-  { id: 'atm_asia',            name: 'ATM 亞洲盤 (NQ-USDT)'  },
+  { id: 'atm_asia',            name: 'ATM 亞洲盤 (NASDAQ100-USDT)'  },
   { id: 'ms_ob',               name: 'Market Structure + OB'  },
   { id: 'structural_reversal', name: 'Structural Reversal (PRZ)' },
   { id: 'smc_session',         name: 'SMC Rolling Session'    },
@@ -993,8 +993,8 @@ export default function App() {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery,  setSearchQuery]  = useState('');
   const [favorites, setFavorites] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem('favoriteSymbols') || '["NQ-USDT","BTCUSDT","ETHUSDT","SOLUSDT"]'); }
-    catch { return ['NQ-USDT','BTCUSDT','ETHUSDT','SOLUSDT']; }
+    try { return JSON.parse(localStorage.getItem('favoriteSymbols') || '["NASDAQ100-USDT","BTCUSDT","ETHUSDT","SOLUSDT"]'); }
+    catch { return ['NASDAQ100-USDT','BTCUSDT','ETHUSDT','SOLUSDT']; }
   });
   const [availableSymbols, setAvailableSymbols] = useState<string[]>(SYMBOLS);
   const [customSymbols, setCustomSymbols] = useState<string[]>(() => {
