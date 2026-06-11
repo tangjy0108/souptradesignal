@@ -1,38 +1,25 @@
-// Debug endpoint: try multiple NASDAQ100 symbol formats and report what BINGx returns
+// Debug endpoint: search BINGx contracts list for NASDAQ / NQ / index symbols
 const BINGX_BASE = 'https://open-api.bingx.com/openApi/swap/v2/quote';
-
-const CANDIDATES = [
-  'NASDAQ100-USD',
-  'NASDAQ100-USDT',
-  'NASDAQ100USD',
-  'NASDAQ100USDT',
-  'US100-USDT',
-  'NDX-USDT',
-];
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  const results = [];
 
-  for (const sym of CANDIDATES) {
-    try {
-      const url = `${BINGX_BASE}/klines?symbol=${encodeURIComponent(sym)}&interval=15m&limit=3`;
-      const r = await fetch(url);
-      const text = await r.text();
-      let json;
-      try { json = JSON.parse(text); } catch { json = null; }
-      results.push({
-        symbol: sym,
-        httpStatus: r.status,
-        bingxCode: json?.code ?? 'parse_error',
-        bingxMsg: json?.msg ?? null,
-        hasData: Array.isArray(json?.data) && json.data.length > 0,
-        firstClose: Array.isArray(json?.data) && json.data[0] ? json.data[0].close : null,
-      });
-    } catch (err) {
-      results.push({ symbol: sym, error: err.message });
+  try {
+    const r = await fetch(`${BINGX_BASE}/contracts`);
+    const json = await r.json();
+    if (json.code !== 0 || !Array.isArray(json.data)) {
+      return res.status(200).json({ error: json.msg, code: json.code });
     }
-  }
 
-  return res.status(200).json({ results });
+    const keywords = ['NASD', 'NQ', 'US10', 'NDX', 'DOW', 'SP5', 'GOLD', 'OIL', 'XAU'];
+    const matches = json.data
+      .filter(s => keywords.some(k => s.symbol?.toUpperCase().includes(k)))
+      .map(s => s.symbol);
+
+    const allSymbols = json.data.map(s => s.symbol);
+
+    return res.status(200).json({ matches, total: allSymbols.length });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 }
