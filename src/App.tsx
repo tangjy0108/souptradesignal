@@ -60,7 +60,7 @@ const CandlestickShape = (props: any) => {
   const isUp = close >= open;
   const color = isUp ? '#089981' : '#F23645';
   const range = high - low;
-  const bodyWidth = Math.max(3, Math.min(width * 0.62, 7));
+  const bodyWidth = Math.max(2, Math.min(width * 0.72, 14));
   const bodyX = x + (width - bodyWidth) / 2;
   const wickWidth = width < 8 ? 1 : 1.15;
 
@@ -92,12 +92,20 @@ const SYMBOLS = [
 ];
 
 const INTERVALS = [
+  { label: '1m',  value: '1m'  },
   { label: '5m',  value: '5m'  },
   { label: '15m', value: '15m' },
   { label: '1H',  value: '1h'  },
   { label: '4H',  value: '4h'  },
   { label: '1D',  value: '1d'  },
 ];
+
+function klinesLimit(iv: string): number {
+  if (iv === '1m')  return 100;
+  if (iv === '5m')  return 120;
+  if (iv === '4h' || iv === '1d') return 100;
+  return 150;
+}
 
 const STRATEGIES = [
   { id: 'atm_asia',            name: 'ATM 亞洲盤 (NQ-USDT)'  },
@@ -1079,7 +1087,7 @@ export default function App() {
 
   // Klines
   useEffect(() => { setStrategyResult(null); }, [symbol, interval]);
-  const { data: rawData, loading, error, isFutures } = useKlines(symbol, interval, 150);
+  const { data: rawData, loading, error, isFutures } = useKlines(symbol, interval, klinesLimit(interval));
 
   const chartData = useMemo(() => {
     if (!rawData || rawData.length === 0) return [];
@@ -2777,7 +2785,7 @@ export default function App() {
                 </div>
 
                 <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={strategyId === 'harmonics' ? harmonicChartData : chartData} margin={{ top: 70, right: 20, left: 20, bottom: 0 }}>
+                  <ComposedChart data={strategyId === 'harmonics' ? harmonicChartData : chartData} margin={{ top: 70, right: 20, left: 20, bottom: 0 }} barCategoryGap="2%">
                     <CartesianGrid strokeDasharray="3 3" stroke="#1E222D" vertical={false} />
                     <XAxis dataKey="timeStr" stroke="#434651" tick={{ fill: '#787B86', fontSize: 11, fontWeight: 500 }}
                       tickMargin={12} minTickGap={40} axisLine={false} tickLine={false} />
