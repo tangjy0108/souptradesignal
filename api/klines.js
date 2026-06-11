@@ -2,10 +2,10 @@
 const BINGX_BASE = 'https://open-api.bingx.com/openApi/swap/v2/quote';
 
 // Symbols that BINGx API accepts without dash (index/commodity perpetuals)
-const NODASH_SYMBOLS = new Set(['NASDAQ100USDT', 'US30USDT', 'SP500USDT', 'XAUUSDT', 'XAGUUSDT']);
+const NODASH_SYMBOLS = new Set(['NASDAQ100USD', 'US30USDT', 'SP500USDT', 'XAUUSDT', 'XAGUUSDT']);
 
 function toBingxSymbol(symbol) {
-  if (NODASH_SYMBOLS.has(symbol)) return symbol;      // keep as-is: NASDAQ100USDT
+  if (NODASH_SYMBOLS.has(symbol)) return symbol;      // keep as-is: NASDAQ100USD
   if (symbol.includes('-')) return symbol;             // already BINGx format: BTC-USDT
   if (symbol.endsWith('USDT')) return symbol.slice(0, -4) + '-USDT'; // BTCUSDT → BTC-USDT
   return symbol;

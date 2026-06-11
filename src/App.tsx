@@ -83,12 +83,12 @@ const CandlestickShape = (props: any) => {
 
 // ── Constants ──
 const SYMBOL_DISPLAY: Record<string, string> = {
-  'NASDAQ100USDT': 'NQ',
+  'NASDAQ100USD': 'NQ',
 };
 const displaySymbol = (s: string) => SYMBOL_DISPLAY[s] ?? s;
 
 const SYMBOLS = [
-  'NASDAQ100USDT',
+  'NASDAQ100USD',
   'BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','ADAUSDT','DOGEUSDT',
   'XRPUSDT','DOTUSDT','LINKUSDT','AVAXUSDT','LTCUSDT','UNIUSDT',
   'ATOMUSDT','ETCUSDT','XLMUSDT','ALGOUSDT','FILUSDT','NEARUSDT',
@@ -905,7 +905,7 @@ function detectSupportResistance(data: any[], n = 5): { support: number[]; resis
 
 export default function App() {
   // ── Persisted state ──
-  const [symbol, setSymbol]     = useState(() => { try { return localStorage.getItem('qv_symbol') || 'NASDAQ100USDT'; } catch { return 'NASDAQ100USDT'; } });
+  const [symbol, setSymbol]     = useState(() => { try { return localStorage.getItem('qv_symbol') || 'NASDAQ100USD'; } catch { return 'NASDAQ100USD'; } });
   const [interval, setInterval] = useState(() => { try { return localStorage.getItem('qv_interval') || '15m'; } catch { return '15m'; } });
 
   const [strategyId, setStrategyId]   = useState('ms_ob');
@@ -998,8 +998,8 @@ export default function App() {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery,  setSearchQuery]  = useState('');
   const [favorites, setFavorites] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem('favoriteSymbols') || '["NASDAQ100USDT","BTCUSDT","ETHUSDT","SOLUSDT"]'); }
-    catch { return ['NASDAQ100USDT','BTCUSDT','ETHUSDT','SOLUSDT']; }
+    try { return JSON.parse(localStorage.getItem('favoriteSymbols') || '["NASDAQ100USD","BTCUSDT","ETHUSDT","SOLUSDT"]'); }
+    catch { return ['NASDAQ100USD','BTCUSDT','ETHUSDT','SOLUSDT']; }
   });
   const [availableSymbols, setAvailableSymbols] = useState<string[]>(SYMBOLS);
   const [customSymbols, setCustomSymbols] = useState<string[]>(() => {

@@ -11,11 +11,11 @@ export default async function handler(req, res) {
     if (json.code !== 0 || !Array.isArray(json.data)) {
       return res.status(502).json({ error: 'BINGx invalid response' });
     }
-    // All symbols: remove dash — BTC-USDT → BTCUSDT, NASDAQ100-USDT → NASDAQ100USDT
+    // Remove dash: BTC-USDT → BTCUSDT, NASDAQ100-USD → NASDAQ100USD
     const symbols = json.data
       .map((s) => s.symbol)
-      .filter((s) => typeof s === 'string' && s.endsWith('-USDT'))
-      .map((s) => s.replace('-USDT', 'USDT'));
+      .filter((s) => typeof s === 'string' && (s.endsWith('-USDT') || s.endsWith('-USD')))
+      .map((s) => s.replace(/-USD(T?)$/, 'USD$1'));
 
     res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate=60');
     return res.status(200).json({ symbols });
