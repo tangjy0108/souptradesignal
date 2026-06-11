@@ -82,10 +82,7 @@ const CandlestickShape = (props: any) => {
 };
 
 // ── Constants ──
-const SYMBOL_DISPLAY: Record<string, string> = {
-  'NASDAQ100USD': 'NQ',
-};
-const displaySymbol = (s: string) => SYMBOL_DISPLAY[s] ?? s;
+const displaySymbol = (s: string) => s;
 
 const SYMBOLS = [
   'NASDAQ100USD',
