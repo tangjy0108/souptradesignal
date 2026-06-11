@@ -1,10 +1,15 @@
 // Server-side proxy for BINGx klines — avoids browser CORS restrictions
 const BINGX_BASE = 'https://open-api.bingx.com/openApi/swap/v2/quote';
 
+// Display name → actual BINGx contract symbol
+const SYMBOL_MAP = {
+  'NASDAQ100USD': 'NCSINASDAQ1002USD-USDT',
+};
+
 function toBingxSymbol(symbol) {
-  if (symbol === 'NASDAQ100USD') return 'NASDAQ100-USD'; // index perpetual: no T suffix
-  if (symbol.includes('-')) return symbol;               // already BINGx format: BTC-USDT
-  if (symbol.endsWith('USDT')) return symbol.slice(0, -4) + '-USDT'; // BTCUSDT → BTC-USDT
+  if (SYMBOL_MAP[symbol]) return SYMBOL_MAP[symbol];
+  if (symbol.includes('-')) return symbol;
+  if (symbol.endsWith('USDT')) return symbol.slice(0, -4) + '-USDT';
   return symbol;
 }
 

@@ -1522,7 +1522,7 @@ async function runIctKillzoneOpt3Strategy(symbol: string): Promise<StrategyResul
 // ════════════════════════════════════════════════════════════
 // ATM Asia Strategy (BINGx NASDAQ100USD)
 // ════════════════════════════════════════════════════════════
-const ATM_SYMBOL = 'NASDAQ100USD';
+const ATM_SYMBOL = 'NASDAQ100USD'; // proxy maps this to NCSINASDAQ1002USD-USDT
 const ATM_TICK = 0.25;
 
 function getATMTWParts(ms: number) {

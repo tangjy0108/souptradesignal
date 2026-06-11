@@ -2,7 +2,7 @@
 // 台灣時間 Asia Kill Zone: 夏令 06:00-07:00 (1m), Tokyo 09:00-10:00 (5m)
 
 const BINGX_BASE = 'https://open-api.bingx.com/openApi/swap/v2/quote';
-export const ATM_SYMBOL = 'NASDAQ100-USD'; // BINGx API symbol format
+export const ATM_SYMBOL = 'NCSINASDAQ1002USD-USDT';
 const TICK = 0.25;
 
 // Taiwan time helpers
