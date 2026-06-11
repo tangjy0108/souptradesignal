@@ -993,8 +993,8 @@ export default function App() {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery,  setSearchQuery]  = useState('');
   const [favorites, setFavorites] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem('favoriteSymbols') || '["BTCUSDT","ETHUSDT","SOLUSDT"]'); }
-    catch { return ['BTCUSDT','ETHUSDT','SOLUSDT']; }
+    try { return JSON.parse(localStorage.getItem('favoriteSymbols') || '["NQ-USDT","BTCUSDT","ETHUSDT","SOLUSDT"]'); }
+    catch { return ['NQ-USDT','BTCUSDT','ETHUSDT','SOLUSDT']; }
   });
   const [availableSymbols, setAvailableSymbols] = useState<string[]>(SYMBOLS);
   const [customSymbols, setCustomSymbols] = useState<string[]>(() => {
@@ -1017,16 +1017,11 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch('https://open-api.bingx.com/openApi/swap/v2/quote/contracts');
+        const res = await fetch('/api/contracts');
         if (res.ok) {
           const json = await res.json();
-          if (json.code === 0 && Array.isArray(json.data)) {
-            // BINGx symbols: BTC-USDT → BTCUSDT (for display compat), keep NQ-USDT as-is
-            const syms = json.data
-              .map((s: any) => s.symbol as string)
-              .filter((s: string) => s.endsWith('-USDT'))
-              .map((s: string) => s === 'NQ-USDT' ? s : s.replace('-USDT', 'USDT'));
-            if (syms.length > 0) setAvailableSymbols(Array.from(new Set([...SYMBOLS, ...syms])));
+          if (Array.isArray(json.symbols) && json.symbols.length > 0) {
+            setAvailableSymbols(Array.from(new Set([...SYMBOLS, ...json.symbols])));
           }
         }
       } catch (_) {}
@@ -1474,15 +1469,14 @@ export default function App() {
         setStrategyResult(null);
       } else if (strategyId === 'snr_fvg') {
         // Use BINGx for SNR/FVG klines
-        const bingxSym = symbol.includes('-') ? symbol : (symbol.endsWith('USDT') ? symbol.slice(0, -4) + '-USDT' : symbol);
-        const res = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/klines?symbol=${encodeURIComponent(bingxSym)}&interval=15m&limit=200`);
+        const res = await fetch(`/api/klines?symbol=${encodeURIComponent(symbol)}&interval=15m&limit=200`);
         if (res.ok) {
           const json = await res.json();
-          if (json.code === 0 && Array.isArray(json.data)) {
-            const klines = json.data.map((k: any) => ({
-              open: parseFloat(k.open), high: parseFloat(k.high),
-              low: parseFloat(k.low), close: parseFloat(k.close),
-              volume: parseFloat(k.volume || 0),
+          if (Array.isArray(json.klines)) {
+            const klines = json.klines.map((k: any) => ({
+              open: k.open, high: k.high,
+              low: k.low, close: k.close,
+              volume: k.volume ?? 0,
             }));
             const snrP = chartPreset?.snrLqP;
             const result = detectSNRFVG(
@@ -1518,28 +1512,25 @@ export default function App() {
     setIsScanning(true);
     setScanResults([]);
     const results: { symbol: string; pattern: HarmonicPattern }[] = [];
-    const toBx = (s: string) => s.includes('-') ? s : (s.endsWith('USDT') ? s.slice(0, -4) + '-USDT' : s);
     for (const sym of symbols) {
       try {
-        const bxSym = toBx(sym);
-        const res = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/klines?symbol=${encodeURIComponent(bxSym)}&interval=15m&limit=150`);
+        const res = await fetch(`/api/klines?symbol=${encodeURIComponent(sym)}&interval=15m&limit=150`);
         if (!res.ok) continue;
         const json = await res.json();
-        if (json.code !== 0 || !Array.isArray(json.data) || json.data.length < 50) continue;
-        const klines = json.data.map((k: any) => ({
-          open: parseFloat(k.open), high: parseFloat(k.high),
-          low: parseFloat(k.low), close: parseFloat(k.close),
+        if (!Array.isArray(json.klines) || json.klines.length < 50) continue;
+        const klines = json.klines.map((k: any) => ({
+          open: k.open, high: k.high, low: k.low, close: k.close,
         }));
         const closes = klines.map((k: any) => k.close);
         const rsiArr = calculateRSI(closes, 14);
         const patterns = detectHarmonics(klines, rsiArr.length === klines.length ? rsiArr : undefined);
         if (patterns.length > 0) {
-          const res1h = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/klines?symbol=${encodeURIComponent(bxSym)}&interval=1h&limit=50`).catch(() => null);
+          const res1h = await fetch(`/api/klines?symbol=${encodeURIComponent(sym)}&interval=1h&limit=50`).catch(() => null);
           let divConfirmed = false;
           if (res1h?.ok) {
             const json1h = await res1h.json().catch(() => null);
-            if (json1h?.code === 0 && Array.isArray(json1h.data) && json1h.data.length >= 20) {
-              const closes1h = json1h.data.map((k: any) => parseFloat(k.close));
+            if (Array.isArray(json1h?.klines) && json1h.klines.length >= 20) {
+              const closes1h = json1h.klines.map((k: any) => k.close);
               const rsi1h = calculateRSI(closes1h, 14);
               const lastRsi = rsi1h[rsi1h.length - 1];
               const prevRsi = rsi1h[rsi1h.length - 6];

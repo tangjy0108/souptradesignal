@@ -67,28 +67,13 @@ export type StrategyResult = {
   };
 } | null;
 
-const BINGX_BASE = 'https://open-api.bingx.com/openApi/swap/v2/quote';
-
-function toBingxSymbol(symbol: string): string {
-  if (symbol.includes('-')) return symbol;
-  if (symbol.endsWith('USDT')) return symbol.slice(0, -4) + '-USDT';
-  return symbol;
-}
-
 async function fetchKlinesWithFallback(symbol: string, interval: string, limit: number) {
-  const bingxSym = toBingxSymbol(symbol);
-  const url = `${BINGX_BASE}/klines?symbol=${encodeURIComponent(bingxSym)}&interval=${interval}&limit=${limit}`;
+  const url = `/api/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`BINGx fetch failed for ${symbol} ${interval}`);
+  if (!res.ok) throw new Error(`klines fetch failed for ${symbol} ${interval}`);
   const json = await res.json();
-  if (json.code !== 0 || !Array.isArray(json.data)) throw new Error(`BINGx invalid response for ${symbol}`);
-  return (json.data as any[]).map(d => ({
-    time: Number(d.time),
-    open: parseFloat(d.open),
-    high: parseFloat(d.high),
-    low: parseFloat(d.low),
-    close: parseFloat(d.close),
-  })).sort((a, b) => a.time - b.time);
+  if (!Array.isArray(json.klines)) throw new Error(`invalid klines response for ${symbol}`);
+  return json.klines as { time: number; open: number; high: number; low: number; close: number }[];
 }
 
 type KillzoneSession = 'Asia' | 'London' | 'New York' | 'Off-Hours';
