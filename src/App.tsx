@@ -82,6 +82,11 @@ const CandlestickShape = (props: any) => {
 };
 
 // ── Constants ──
+const SYMBOL_DISPLAY: Record<string, string> = {
+  'NASDAQ100USDT': 'NQ',
+};
+const displaySymbol = (s: string) => SYMBOL_DISPLAY[s] ?? s;
+
 const SYMBOLS = [
   'NASDAQ100USDT',
   'BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','ADAUSDT','DOGEUSDT',
@@ -108,7 +113,7 @@ function klinesLimit(iv: string): number {
 }
 
 const STRATEGIES = [
-  { id: 'atm_asia',            name: 'ATM 亞洲盤 (NASDAQ100USDT)'  },
+  { id: 'atm_asia',            name: 'ATM 亞洲盤 (NQ)'  },
   { id: 'ms_ob',               name: 'Market Structure + OB'  },
   { id: 'structural_reversal', name: 'Structural Reversal (PRZ)' },
   { id: 'smc_session',         name: 'SMC Rolling Session'    },
@@ -1576,7 +1581,7 @@ export default function App() {
           return (
             <button key={s} onClick={() => selectSymbol(s)}
               className={`w-full flex items-center justify-between px-4 py-2.5 text-left text-sm transition-colors ${symbol === s ? 'bg-[#2962FF]/10 text-[#2962FF] font-medium' : 'text-[#D1D4DC] hover:bg-[#2A2E39]'}`}>
-              {s}
+              {displaySymbol(s)}
               <Star onClick={(e) => toggleFavorite(e, s)}
                 className={`w-4 h-4 shrink-0 transition-colors ${isFav ? 'fill-[#FFC107] text-[#FFC107]' : 'text-[#787B86] hover:text-[#D1D4DC]'}`} />
             </button>
@@ -2548,7 +2553,7 @@ export default function App() {
             <select value={symbol} onChange={e => selectSymbol(e.target.value)}
               className="bg-transparent text-[#D1D4DC] font-semibold text-lg outline-none cursor-pointer hover:text-white transition-colors appearance-none pr-6">
               {Array.from(new Set(favorites.includes(symbol) ? favorites : [symbol, ...favorites])).map(s => (
-                <option key={s} value={s} className="bg-[#131722] text-sm">{s}</option>
+                <option key={s} value={s} className="bg-[#131722] text-sm">{displaySymbol(s)}</option>
               ))}
             </select>
             <ChevronDown className="w-4 h-4 text-[#787B86] absolute right-0 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -2668,7 +2673,7 @@ export default function App() {
             <select value={symbol} onChange={e => selectSymbol(e.target.value)}
               className="bg-transparent text-[#D1D4DC] font-bold text-base outline-none cursor-pointer appearance-none pr-5">
               {Array.from(new Set(favorites.includes(symbol) ? favorites : [symbol, ...favorites])).map(s => (
-                <option key={s} value={s} className="bg-[#131722] text-sm">{s}</option>
+                <option key={s} value={s} className="bg-[#131722] text-sm">{displaySymbol(s)}</option>
               ))}
             </select>
             <ChevronDown className="w-3.5 h-3.5 text-[#787B86] absolute right-0 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -2745,7 +2750,7 @@ export default function App() {
                 <div className="absolute top-4 left-4 z-10 flex flex-col gap-1 pointer-events-none">
                   <div className="flex items-baseline gap-3 pointer-events-auto flex-wrap">
                     <div className="text-2xl font-bold text-white flex items-center gap-2">
-                      {symbol}
+                      {displaySymbol(symbol)}
                       <button onClick={e => toggleFavorite(e, symbol)} className="focus:outline-none hover:scale-110 transition-transform">
                         <Star className={`w-5 h-5 transition-colors ${favorites.includes(symbol) ? 'fill-[#FFC107] text-[#FFC107]' : 'text-[#787B86] hover:text-[#D1D4DC]'}`} />
                       </button>
