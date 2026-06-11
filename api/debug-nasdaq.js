@@ -1,25 +1,32 @@
-// Debug endpoint: search BINGx contracts list for NASDAQ / NQ / index symbols
+// Debug endpoint: test which NASDAQ100 symbol actually returns klines
 const BINGX_BASE = 'https://open-api.bingx.com/openApi/swap/v2/quote';
+
+const CANDIDATES = [
+  'NCSINASDAQ1002USD-USDT',
+  'NCSI724NASDAQ1002USD-USDT',
+  'NCSKIONQ2USD-USDT',
+];
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
+  const results = [];
 
-  try {
-    const r = await fetch(`${BINGX_BASE}/contracts`);
-    const json = await r.json();
-    if (json.code !== 0 || !Array.isArray(json.data)) {
-      return res.status(200).json({ error: json.msg, code: json.code });
+  for (const sym of CANDIDATES) {
+    try {
+      const url = `${BINGX_BASE}/klines?symbol=${encodeURIComponent(sym)}&interval=15m&limit=3`;
+      const r = await fetch(url);
+      const json = await r.json();
+      results.push({
+        symbol: sym,
+        code: json.code,
+        msg: json.msg ?? null,
+        hasData: Array.isArray(json.data) && json.data.length > 0,
+        sample: Array.isArray(json.data) ? json.data[0] : null,
+      });
+    } catch (err) {
+      results.push({ symbol: sym, error: err.message });
     }
-
-    const keywords = ['NASD', 'NQ', 'US10', 'NDX', 'DOW', 'SP5', 'GOLD', 'OIL', 'XAU'];
-    const matches = json.data
-      .filter(s => keywords.some(k => s.symbol?.toUpperCase().includes(k)))
-      .map(s => s.symbol);
-
-    const allSymbols = json.data.map(s => s.symbol);
-
-    return res.status(200).json({ matches, total: allSymbols.length });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
   }
+
+  return res.status(200).json({ results });
 }
