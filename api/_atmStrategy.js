@@ -2,7 +2,7 @@
 // 台灣時間 Asia Kill Zone: 夏令 06:00-07:00 (1m), Tokyo 09:00-10:00 (5m)
 
 const BINGX_BASE = 'https://open-api.bingx.com/openApi/swap/v2/quote';
-export const ATM_SYMBOL = 'NASDAQ100-USDT';
+export const ATM_SYMBOL = 'NASDAQ100USDT';
 const TICK = 0.25;
 
 // Taiwan time helpers
@@ -242,7 +242,7 @@ export function buildATMTelegramMessage(signal, twTime) {
   if (signal.stage === 2) {
     const emoji = signal.bias === 'LONG' ? '🟢' : '🔴';
     return [
-      `${emoji} <b>NASDAQ100-USDT ATM — OB 發現</b>`,
+      `${emoji} <b>NASDAQ100USDT ATM — OB 發現</b>`,
       `方向：<b>${signal.bias}</b> | ${signal.interactionType === 'SWEEP' ? '假突破 (Sweep)' : '突破 (Breakout)'}`,
       '',
       `🌏 Asia High：<code>${signal.asiaHigh?.toFixed(2)}</code>`,
@@ -256,7 +256,7 @@ export function buildATMTelegramMessage(signal, twTime) {
   if (signal.stage === 3) {
     const emoji = signal.bias === 'LONG' ? '🚀' : '🔻';
     return [
-      `${emoji} <b>NASDAQ100-USDT ATM — 最終訊號</b>`,
+      `${emoji} <b>NASDAQ100USDT ATM — 最終訊號</b>`,
       `方向：<b>${signal.bias}</b> | ${signal.interactionType}`,
       '',
       `📍 Entry：<code>${signal.entry?.toFixed(2)}</code>`,

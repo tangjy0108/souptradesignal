@@ -1,9 +1,13 @@
 // Server-side proxy for BINGx klines — avoids browser CORS restrictions
 const BINGX_BASE = 'https://open-api.bingx.com/openApi/swap/v2/quote';
 
+// Symbols that BINGx API accepts without dash (index/commodity perpetuals)
+const NODASH_SYMBOLS = new Set(['NASDAQ100USDT', 'US30USDT', 'SP500USDT', 'XAUUSDT', 'XAGUUSDT']);
+
 function toBingxSymbol(symbol) {
-  if (symbol.includes('-')) return symbol;
-  if (symbol.endsWith('USDT')) return symbol.slice(0, -4) + '-USDT';
+  if (NODASH_SYMBOLS.has(symbol)) return symbol;      // keep as-is: NASDAQ100USDT
+  if (symbol.includes('-')) return symbol;             // already BINGx format: BTC-USDT
+  if (symbol.endsWith('USDT')) return symbol.slice(0, -4) + '-USDT'; // BTCUSDT → BTC-USDT
   return symbol;
 }
 
@@ -25,7 +29,7 @@ export default async function handler(req, res) {
     }
     const json = await upstream.json();
     if (json.code !== 0 || !Array.isArray(json.data)) {
-      return res.status(502).json({ error: `BINGx error: ${json.msg || 'unknown'}` });
+      return res.status(502).json({ error: `BINGx error: ${json.msg || 'unknown'}`, code: json.code, symbol: bingxSym, url });
     }
 
     const klines = json.data
