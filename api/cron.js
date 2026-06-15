@@ -854,7 +854,7 @@ export default async function handler(req, res) {
         const sig = atmResult.signal;
         const twDateKey = getTimePartsInZone(now, 'Asia/Taipei').dateKey;
         const obStr = sig.ob ? `${sig.ob.low?.toFixed(2)}-${sig.ob.high?.toFixed(2)}` : 'noob';
-        const atmSignalKey = `atm_asia|${twDateKey}|${sig.stage}|${sig.bias}|${obStr}`;
+        const atmSignalKey = `atm_asia|${twDateKey}|OB_FOUND|${sig.bias}|${obStr}`;
 
         const existing = await listSignalsByKeys([atmSignalKey]).catch(() => []);
         if (existing.length === 0) {
@@ -869,13 +869,13 @@ export default async function handler(req, res) {
               strategyName: 'ATM Asia',
               direction: sig.bias,
               status: 'OPEN',
-              lifecycleState: sig.stage === 3 ? 'LIVE_SIGNAL' : 'OB_FOUND',
-              entryLow: sig.entry || 0,
-              entryHigh: sig.entry || 0,
-              stop: sig.sl || 0,
-              target: sig.tp1 || 0,
-              rr: sig.rr || 0,
-              marketPrice: sig.entry || 0,
+              lifecycleState: 'OB_FOUND',
+              entryLow: 0,
+              entryHigh: 0,
+              stop: 0,
+              target: 0,
+              rr: 0,
+              marketPrice: 0,
               updatedAt: now.toISOString(),
             }]).catch(() => {});
           }
@@ -1003,7 +1003,7 @@ export default async function handler(req, res) {
         closeOutcome: event.closeOutcome,
       })),
       sendErrors,
-      atm: atmSignal ? { stage: atmSignal.stage, type: atmSignal.type, bias: atmSignal.bias } : null,
+      atm: atmSignal ? { type: atmSignal.type, bias: atmSignal.bias, refName: atmSignal.refName } : null,
     });
   } catch (err) {
     console.error('Cron error:', err);

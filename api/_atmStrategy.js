@@ -25,17 +25,16 @@ function getTWParts(date = new Date()) {
 
 // Kill Zone windows (TW time, minutes of day). Winter time +60.
 function getKZWindows() {
-  // Detect winter time: Nov–Mar Taipei doesn't change clocks but NY does.
-  // Simple approximation: if UTC offset of America/New_York is -5 (winter), use winter windows.
   const nowNY = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit' }).formatToParts(new Date());
   const nyHour = Number(nowNY.find(p => p.type === 'hour')?.value || 0);
   const utcHour = new Date().getUTCHours();
-  // NY UTC offset: -4 (summer) or -5 (winter)
   const nyOffset = ((nyHour - utcHour + 24) % 24 > 12 ? ((nyHour - utcHour + 24) % 24) - 24 : (nyHour - utcHour + 24) % 24);
   const isWinter = nyOffset === -5;
   return {
-    asiaStart: isWinter ? 7 * 60 : 6 * 60,
-    asiaEnd:   isWinter ? 8 * 60 : 7 * 60,
+    asiaStart:  isWinter ? 7 * 60 : 6 * 60,
+    asiaEnd:    isWinter ? 8 * 60 : 7 * 60,
+    tokyoStart: isWinter ? 10 * 60 : 9 * 60,
+    tokyoEnd:   isWinter ? 11 * 60 : 10 * 60,
   };
 }
 
@@ -99,69 +98,75 @@ function detectWickRejection(candle, ob, bias) {
     (candle.high - Math.max(candle.open, candle.close)) > bodySize * 0.5;
 }
 
-// Stateless ATM scan: processes all klines for today and returns current ctx + any new signal
+// Stateless ATM scan: returns OB_FOUND signal for informational notification only.
+// Final signal (entry/SL/TP) is handled by the Python signalbot.
 export async function runATMScan(prevCtx = null) {
   const now = new Date();
   const tw = getTWParts(now);
-  const { asiaStart, asiaEnd } = getKZWindows();
+  const { asiaStart, asiaEnd, tokyoStart, tokyoEnd } = getKZWindows();
 
-  // Build initial context
   let ctx = prevCtx && prevCtx.dateKey === tw.dateKey ? { ...prevCtx } : {
     dateKey: tw.dateKey,
     state: 'IDLE',
-    asiaHigh: null,
-    asiaLow: null,
-    bias: null,
-    interactionType: null,
-    ob: null,
+    asiaHigh: null, asiaLow: null,
+    tokyoHigh: null, tokyoLow: null,
+    tokyoLocked: false,
+    bias: null, interactionType: null, ob: null,
     displaced: false,
-    checklist: { rangeFormed: false, sweepOrBreakout: false, obFound: false, displaced: false, retest: false, wickRejection: false },
   };
 
-  const inAsia = tw.minuteOfDay >= asiaStart && tw.minuteOfDay < asiaEnd;
+  const inAsia  = tw.minuteOfDay >= asiaStart  && tw.minuteOfDay < asiaEnd;
+  const inTokyo = tw.minuteOfDay >= tokyoStart && tw.minuteOfDay < tokyoEnd;
+  const postTokyo = tw.minuteOfDay >= tokyoEnd;
 
-  // Fetch 1m klines (enough to cover today's Asia session + post-Asia)
   const klines = await fetchBingxKlines(ATM_SYMBOL, '1m', 300);
   if (!klines || klines.length < 10) return { ctx, signal: null };
 
-  const todayMs = new Date(now.toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' })).getTime();
-  const asiaStartMs = todayMs + asiaStart * 60 * 1000 - 8 * 60 * 60 * 1000; // TW is UTC+8
-
-  // Build today's candles in TW time
   const todayKey = tw.dateKey;
   const todayKlines = klines.filter(k => getTWParts(new Date(k.time)).dateKey === todayKey);
 
-  if (inAsia) {
-    // Update Asia Range
-    const asiaCandles = todayKlines.filter(k => {
-      const { minuteOfDay } = getTWParts(new Date(k.time));
-      return minuteOfDay >= asiaStart && minuteOfDay < asiaEnd;
-    });
-    if (asiaCandles.length > 0) {
-      ctx.asiaHigh = Math.max(...asiaCandles.map(k => k.high));
-      ctx.asiaLow = Math.min(...asiaCandles.map(k => k.low));
-      ctx.state = 'ASIA_RANGE_FORMING';
-    }
-    return { ctx, signal: null };
-  }
-
-  // After Asia session ends
+  // Always derive Asia range from today's Asia candles
   const asiaCandles = todayKlines.filter(k => {
     const { minuteOfDay } = getTWParts(new Date(k.time));
     return minuteOfDay >= asiaStart && minuteOfDay < asiaEnd;
   });
-
-  if (asiaCandles.length > 0 && !ctx.asiaHigh) {
+  if (asiaCandles.length > 0) {
     ctx.asiaHigh = Math.max(...asiaCandles.map(k => k.high));
-    ctx.asiaLow = Math.min(...asiaCandles.map(k => k.low));
-    ctx.checklist.rangeFormed = true;
-    ctx.state = 'ASIA_RANGE_LOCKED';
+    ctx.asiaLow  = Math.min(...asiaCandles.map(k => k.low));
+  }
+
+  if (inAsia) {
+    ctx.state = 'ASIA_RANGE_FORMING';
+    return { ctx, signal: null };
   }
 
   if (!ctx.asiaHigh || !ctx.asiaLow) return { ctx, signal: null };
-  if (ctx.state === 'SIGNAL_FIRED') return { ctx, signal: null }; // already done today
+  if (ctx.state === 'IDLE') ctx.state = 'ASIA_RANGE_LOCKED';
 
-  // Process post-Asia candles through state machine
+  // Derive Tokyo range from today's Tokyo candles
+  const tokyoCandles = todayKlines.filter(k => {
+    const { minuteOfDay } = getTWParts(new Date(k.time));
+    return minuteOfDay >= tokyoStart && minuteOfDay < tokyoEnd;
+  });
+  if (tokyoCandles.length > 0) {
+    ctx.tokyoHigh = Math.max(...tokyoCandles.map(k => k.high));
+    ctx.tokyoLow  = Math.min(...tokyoCandles.map(k => k.low));
+  }
+  if (postTokyo && ctx.tokyoHigh) {
+    ctx.tokyoLocked = true;
+  }
+
+  // Active reference range: Tokyo (if locked) else Asia
+  const refHigh = ctx.tokyoLocked ? ctx.tokyoHigh : ctx.asiaHigh;
+  const refLow  = ctx.tokyoLocked ? ctx.tokyoLow  : ctx.asiaLow;
+  const refName = ctx.tokyoLocked ? 'Tokyo' : 'Asia';
+
+  // During Tokyo session (building range), pause interaction detection if no setup yet
+  if (inTokyo && ctx.state === 'ASIA_RANGE_LOCKED') {
+    return { ctx, signal: null };
+  }
+
+  // Process post-Asia candles
   const postAsiaCandles = todayKlines.filter(k => {
     const { minuteOfDay } = getTWParts(new Date(k.time));
     return minuteOfDay >= asiaEnd;
@@ -172,15 +177,27 @@ export async function runATMScan(prevCtx = null) {
 
   for (let i = asiaCandles.length; i < allCandles.length; i++) {
     const candle = allCandles[i];
+    const candleTW = getTWParts(new Date(candle.time));
+
+    // Use active range at the time of this candle
+    const candleInTokyo = candleTW.minuteOfDay >= tokyoStart && candleTW.minuteOfDay < tokyoEnd;
+    const candlePostTokyo = candleTW.minuteOfDay >= tokyoEnd;
+    const candleTokyoLocked = candlePostTokyo && ctx.tokyoHigh;
+    const candleRefHigh = candleTokyoLocked ? ctx.tokyoHigh : ctx.asiaHigh;
+    const candleRefLow  = candleTokyoLocked ? ctx.tokyoLow  : ctx.asiaLow;
+    const candleRefName = candleTokyoLocked ? 'Tokyo' : 'Asia';
+
+    // Skip interaction detection during Tokyo build (state still ASIA_RANGE_LOCKED)
+    if (candleInTokyo && ctx.state === 'ASIA_RANGE_LOCKED') continue;
 
     if (ctx.state === 'ASIA_RANGE_LOCKED') {
       let newBias = null, newInteraction = null;
-      if (candle.high > ctx.asiaHigh) {
-        newBias = candle.close <= ctx.asiaHigh ? 'SHORT' : 'LONG';
-        newInteraction = candle.close <= ctx.asiaHigh ? 'SWEEP' : 'BREAKOUT';
-      } else if (candle.low < ctx.asiaLow) {
-        newBias = candle.close >= ctx.asiaLow ? 'LONG' : 'SHORT';
-        newInteraction = candle.close >= ctx.asiaLow ? 'SWEEP' : 'BREAKOUT';
+      if (candle.high > candleRefHigh) {
+        newBias = candle.close <= candleRefHigh ? 'SHORT' : 'LONG';
+        newInteraction = candle.close <= candleRefHigh ? 'SWEEP' : 'BREAKOUT';
+      } else if (candle.low < candleRefLow) {
+        newBias = candle.close >= candleRefLow ? 'LONG' : 'SHORT';
+        newInteraction = candle.close >= candleRefLow ? 'SWEEP' : 'BREAKOUT';
       }
       if (newBias) {
         const ob = findOB(allCandles, newBias, i);
@@ -190,46 +207,42 @@ export async function runATMScan(prevCtx = null) {
           ctx.ob = ob;
           ctx.state = 'WAITING_RETEST';
           ctx.displaced = false;
-          ctx.checklist.sweepOrBreakout = true;
-          ctx.checklist.obFound = true;
-          signal = { stage: 2, type: 'OB_FOUND', bias: ctx.bias, interactionType: ctx.interactionType, asiaHigh: ctx.asiaHigh, asiaLow: ctx.asiaLow, ob: ctx.ob, checklist: { ...ctx.checklist } };
+          signal = {
+            type: 'OB_FOUND',
+            bias: ctx.bias,
+            interactionType: ctx.interactionType,
+            refHigh: candleRefHigh,
+            refLow: candleRefLow,
+            refName: candleRefName,
+            asiaHigh: ctx.asiaHigh,
+            asiaLow: ctx.asiaLow,
+            tokyoHigh: ctx.tokyoHigh,
+            tokyoLow: ctx.tokyoLow,
+            ob: ctx.ob,
+          };
         }
       }
     } else if (ctx.state === 'WAITING_RETEST' && ctx.ob) {
       if (obInvalidated(candle, ctx.ob, ctx.bias)) {
         ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false;
-        ctx.checklist.obFound = false; ctx.checklist.displaced = false; ctx.checklist.retest = false;
         signal = null; continue;
       }
       if (!ctx.displaced) {
         if ((ctx.bias === 'LONG' && candle.close > ctx.ob.high) || (ctx.bias === 'SHORT' && candle.close < ctx.ob.low)) {
-          ctx.displaced = true; ctx.checklist.displaced = true;
+          ctx.displaced = true;
         }
       } else if (candle.low <= ctx.ob.high && candle.high >= ctx.ob.low) {
-        ctx.state = 'WAITING_WICK'; ctx.checklist.retest = true;
+        ctx.state = 'WAITING_WICK';
       }
     } else if (ctx.state === 'WAITING_WICK' && ctx.ob) {
       if (obInvalidated(candle, ctx.ob, ctx.bias)) {
         ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false;
-        ctx.checklist.obFound = false; ctx.checklist.displaced = false; ctx.checklist.retest = false; ctx.checklist.wickRejection = false;
         signal = null; continue;
       }
+      // Wick rejection detected — Python bot handles final signal; just reset to watch for new OB
       if (detectWickRejection(candle, ctx.ob, ctx.bias)) {
-        ctx.checklist.wickRejection = true;
-        ctx.state = 'SIGNAL_FIRED';
-        const entry = candle.close;
-        const sl = ctx.bias === 'LONG' ? ctx.ob.low - TICK : ctx.ob.high + TICK;
-        const tp1 = ctx.bias === 'LONG' ? ctx.asiaHigh : ctx.asiaLow;
-        const tp2 = ctx.bias === 'LONG' ? entry + 2 * (entry - sl) : entry - 2 * (sl - entry);
-        signal = {
-          stage: 3, type: 'FINAL_SIGNAL',
-          bias: ctx.bias, interactionType: ctx.interactionType,
-          asiaHigh: ctx.asiaHigh, asiaLow: ctx.asiaLow, ob: ctx.ob,
-          entry, sl, tp1, tp2,
-          rr: Math.abs(tp2 - entry) / Math.abs(entry - sl),
-          checklist: { ...ctx.checklist },
-        };
-        break;
+        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false;
+        signal = null;
       }
     }
   }
@@ -238,39 +251,19 @@ export async function runATMScan(prevCtx = null) {
 }
 
 export function buildATMTelegramMessage(signal, twTime) {
-  if (!signal) return null;
-  if (signal.stage === 2) {
-    const emoji = signal.bias === 'LONG' ? '🟢' : '🔴';
-    return [
-      `${emoji} <b>NASDAQ100USD ATM — OB 發現</b>`,
-      `方向：<b>${signal.bias}</b> | ${signal.interactionType === 'SWEEP' ? '假突破 (Sweep)' : '突破 (Breakout)'}`,
-      '',
-      `🌏 Asia High：<code>${signal.asiaHigh?.toFixed(2)}</code>`,
-      `🌏 Asia Low：<code>${signal.asiaLow?.toFixed(2)}</code>`,
-      `📦 OB 區間：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
-      '',
-      `☑️ 區間鎖定  ☑️ ${signal.interactionType}  ☑️ OB 識別  ⬜ 位移  ⬜ 回踩  ⬜ 影線拒絕`,
-      `⏰ TW ${twTime}`,
-    ].join('\n');
-  }
-  if (signal.stage === 3) {
-    const emoji = signal.bias === 'LONG' ? '🚀' : '🔻';
-    return [
-      `${emoji} <b>NASDAQ100USD ATM — 最終訊號</b>`,
-      `方向：<b>${signal.bias}</b> | ${signal.interactionType}`,
-      '',
-      `📍 Entry：<code>${signal.entry?.toFixed(2)}</code>`,
-      `🛡️ SL：<code>${signal.sl?.toFixed(2)}</code>`,
-      `🎯 TP1 (Asia ${signal.bias === 'LONG' ? 'High' : 'Low'})：<code>${signal.tp1?.toFixed(2)}</code>`,
-      `🎯 TP2 (1:2 R/R)：<code>${signal.tp2?.toFixed(2)}</code>`,
-      `⚖️ R/R：<code>${signal.rr?.toFixed(2)}</code>`,
-      '',
-      `🌏 Asia Range：<code>${signal.asiaLow?.toFixed(2)} – ${signal.asiaHigh?.toFixed(2)}</code>`,
-      `📦 OB：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
-      '',
-      `☑️ 區間鎖定  ☑️ ${signal.interactionType}  ☑️ OB  ☑️ 位移  ☑️ 回踩  ☑️ 影線拒絕`,
-      `⏰ TW ${twTime}`,
-    ].join('\n');
-  }
-  return null;
+  if (!signal || signal.type !== 'OB_FOUND') return null;
+  const emoji = signal.bias === 'LONG' ? '🟢' : '🔴';
+  const rangeEmoji = signal.refName === 'Tokyo' ? '🗼' : '🌏';
+  const rangeLabel = signal.refName === 'Tokyo' ? '日盤' : '亞洲盤';
+  const interactionLabel = signal.interactionType === 'SWEEP' ? '假突破 (Sweep)' : '突破 (Breakout)';
+  return [
+    `${emoji} <b>NASDAQ100USD ATM — OB 發現</b>`,
+    `方向：<b>${signal.bias}</b> | ${interactionLabel}`,
+    '',
+    `${rangeEmoji} ${rangeLabel} High：<code>${signal.refHigh?.toFixed(2)}</code>`,
+    `${rangeEmoji} ${rangeLabel} Low：<code>${signal.refLow?.toFixed(2)}</code>`,
+    `📦 OB 區間：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
+    '',
+    `⏰ TW ${twTime}`,
+  ].join('\n');
 }
