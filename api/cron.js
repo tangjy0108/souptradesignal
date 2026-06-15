@@ -851,9 +851,35 @@ export default async function handler(req, res) {
     try {
       const atmResult = await runATMScan();
       if (atmResult.signal) {
-        atmSignal = atmResult.signal;
-        const atmMsg = buildATMTelegramMessage(atmResult.signal, twTime);
-        if (atmMsg) await safeSendTelegram(atmMsg, sendErrors, 'atm');
+        const sig = atmResult.signal;
+        const twDateKey = getTimePartsInZone(now, 'Asia/Taipei').dateKey;
+        const obStr = sig.ob ? `${sig.ob.low?.toFixed(2)}-${sig.ob.high?.toFixed(2)}` : 'noob';
+        const atmSignalKey = `atm_asia|${twDateKey}|${sig.stage}|${sig.bias}|${obStr}`;
+
+        const existing = await listSignalsByKeys([atmSignalKey]).catch(() => []);
+        if (existing.length === 0) {
+          atmSignal = sig;
+          const atmMsg = buildATMTelegramMessage(sig, twTime);
+          if (atmMsg) {
+            await safeSendTelegram(atmMsg, sendErrors, 'atm');
+            await upsertSignalsWithMeta([{
+              signalKey: atmSignalKey,
+              symbol: ATM_SYMBOL,
+              strategyId: 'atm_asia',
+              strategyName: 'ATM Asia',
+              direction: sig.bias,
+              status: 'OPEN',
+              lifecycleState: sig.stage === 3 ? 'LIVE_SIGNAL' : 'OB_FOUND',
+              entryLow: sig.entry || 0,
+              entryHigh: sig.entry || 0,
+              stop: sig.sl || 0,
+              target: sig.tp1 || 0,
+              rr: sig.rr || 0,
+              marketPrice: sig.entry || 0,
+              updatedAt: now.toISOString(),
+            }]).catch(() => {});
+          }
+        }
       }
     } catch (atmErr) {
       console.error('ATM scan error:', atmErr);
