@@ -2364,11 +2364,15 @@ export default function App() {
                         </span>
                       ))}
                     </div>
-                    {strategyResult.atmDetails.asiaHigh > 0 && (
+                    {strategyResult.atmDetails.tokyoHigh > 0 ? (
+                      <div className="text-[10px] text-[#F59E0B]">
+                        Tokyo: {strategyResult.atmDetails.tokyoLow.toFixed(2)} – {strategyResult.atmDetails.tokyoHigh.toFixed(2)}
+                      </div>
+                    ) : strategyResult.atmDetails.asiaHigh > 0 ? (
                       <div className="text-[10px] text-[#14B8A6]">
                         Asia: {strategyResult.atmDetails.asiaLow.toFixed(2)} – {strategyResult.atmDetails.asiaHigh.toFixed(2)}
                       </div>
-                    )}
+                    ) : null}
                     {strategyResult.atmDetails.state === 'SIGNAL_FIRED' && strategyResult.atmDetails.tp1 > 0 && (
                       <div className="grid grid-cols-2 gap-1 text-[10px]">
                         <span className="text-[#787B86]">TP1 (Asia)</span>
@@ -2879,18 +2883,25 @@ export default function App() {
                     )}
 
                     {/* ATM Asia Overlays */}
-                    {strategyResult?.atmDetails?.asiaHigh > 0 && (
-                      <ReferenceArea y1={strategyResult.atmDetails.asiaLow} y2={strategyResult.atmDetails.asiaHigh}
-                        {...({ fill: '#14B8A6', fillOpacity: 0.06, stroke: '#14B8A6', strokeWidth: 1, strokeDasharray: '4 4', strokeOpacity: 0.5 } as any)} />
-                    )}
-                    {strategyResult?.atmDetails?.asiaHigh > 0 && (
-                      <ReferenceLine y={strategyResult.atmDetails.asiaHigh} stroke="#14B8A6" strokeDasharray="4 4" strokeWidth={1.5}
-                        label={{ position: 'insideTopLeft', value: 'Asia High', fill: '#14B8A6', fontSize: 11, fontWeight: 600 }} />
-                    )}
-                    {strategyResult?.atmDetails?.asiaLow > 0 && (
-                      <ReferenceLine y={strategyResult.atmDetails.asiaLow} stroke="#14B8A6" strokeDasharray="4 4" strokeWidth={1.5}
-                        label={{ position: 'insideBottomLeft', value: 'Asia Low', fill: '#14B8A6', fontSize: 11, fontWeight: 600 }} />
-                    )}
+                    {strategyResult?.atmDetails?.tokyoHigh > 0 ? (
+                      <>
+                        <ReferenceArea y1={strategyResult.atmDetails.tokyoLow} y2={strategyResult.atmDetails.tokyoHigh}
+                          {...({ fill: '#F59E0B', fillOpacity: 0.06, stroke: '#F59E0B', strokeWidth: 1, strokeDasharray: '4 4', strokeOpacity: 0.5 } as any)} />
+                        <ReferenceLine y={strategyResult.atmDetails.tokyoHigh} stroke="#F59E0B" strokeDasharray="4 4" strokeWidth={1.5}
+                          label={{ position: 'insideTopLeft', value: 'Tokyo High', fill: '#F59E0B', fontSize: 11, fontWeight: 600 }} />
+                        <ReferenceLine y={strategyResult.atmDetails.tokyoLow} stroke="#F59E0B" strokeDasharray="4 4" strokeWidth={1.5}
+                          label={{ position: 'insideBottomLeft', value: 'Tokyo Low', fill: '#F59E0B', fontSize: 11, fontWeight: 600 }} />
+                      </>
+                    ) : strategyResult?.atmDetails?.asiaHigh > 0 ? (
+                      <>
+                        <ReferenceArea y1={strategyResult.atmDetails.asiaLow} y2={strategyResult.atmDetails.asiaHigh}
+                          {...({ fill: '#14B8A6', fillOpacity: 0.06, stroke: '#14B8A6', strokeWidth: 1, strokeDasharray: '4 4', strokeOpacity: 0.5 } as any)} />
+                        <ReferenceLine y={strategyResult.atmDetails.asiaHigh} stroke="#14B8A6" strokeDasharray="4 4" strokeWidth={1.5}
+                          label={{ position: 'insideTopLeft', value: 'Asia High', fill: '#14B8A6', fontSize: 11, fontWeight: 600 }} />
+                        <ReferenceLine y={strategyResult.atmDetails.asiaLow} stroke="#14B8A6" strokeDasharray="4 4" strokeWidth={1.5}
+                          label={{ position: 'insideBottomLeft', value: 'Asia Low', fill: '#14B8A6', fontSize: 11, fontWeight: 600 }} />
+                      </>
+                    ) : null}
                     {strategyResult?.atmDetails?.ob && (
                       <ReferenceArea y1={strategyResult.atmDetails.ob.low} y2={strategyResult.atmDetails.ob.high}
                         {...({ fill: strategyResult.atmDetails.bias === 'LONG' ? '#089981' : '#F23645', fillOpacity: 0.25, stroke: strategyResult.atmDetails.bias === 'LONG' ? '#089981' : '#F23645', strokeWidth: 1.5 } as any)} />

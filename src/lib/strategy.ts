@@ -49,6 +49,8 @@ export type StrategyResult = {
     state: ATMState;
     asiaHigh: number;
     asiaLow: number;
+    tokyoHigh: number;
+    tokyoLow: number;
     bias: 'LONG' | 'SHORT' | null;
     interactionType: 'SWEEP' | 'BREAKOUT' | null;
     ob: { high: number; low: number; mid: number } | null;
@@ -1537,13 +1539,18 @@ function getATMTWParts(ms: number) {
 }
 
 function getATMKZWindows() {
-  // Detect NY DST to determine Asia Kill Zone window
+  // Detect NY DST to determine Kill Zone windows
   const nowNY = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit' }).formatToParts(new Date());
   const nyH = Number(nowNY.find(p => p.type === 'hour')?.value || 0);
   const utcH = new Date().getUTCHours();
   const offset = ((nyH - utcH + 24) % 24 > 12 ? ((nyH - utcH + 24) % 24) - 24 : (nyH - utcH + 24) % 24);
   const isWinter = offset === -5;
-  return { asiaStart: isWinter ? 7 * 60 : 6 * 60, asiaEnd: isWinter ? 8 * 60 : 7 * 60 };
+  return {
+    asiaStart:  isWinter ? 7 * 60 : 6 * 60,
+    asiaEnd:    isWinter ? 8 * 60 : 7 * 60,
+    tokyoStart: isWinter ? 10 * 60 : 9 * 60,
+    tokyoEnd:   isWinter ? 11 * 60 : 10 * 60,
+  };
 }
 
 function findATMOrderBlock(klines: any[], bias: 'LONG' | 'SHORT', sweepIdx: number) {
@@ -1568,13 +1575,19 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
   const now = Date.now();
   const nowTW = getATMTWParts(now);
   const todayKey = nowTW.dateKey;
-  const { asiaStart, asiaEnd } = getATMKZWindows();
+  const { asiaStart, asiaEnd, tokyoStart, tokyoEnd } = getATMKZWindows();
 
   const todayKlines = klines.filter((k: any) => getATMTWParts(k.time).dateKey === todayKey);
   const asiaCandles = todayKlines.filter((k: any) => {
     const { minuteOfDay } = getATMTWParts(k.time);
     return minuteOfDay >= asiaStart && minuteOfDay < asiaEnd;
   });
+  const tokyoCandles = todayKlines.filter((k: any) => {
+    const { minuteOfDay } = getATMTWParts(k.time);
+    return minuteOfDay >= tokyoStart && minuteOfDay < tokyoEnd;
+  });
+  const tokyoHigh = tokyoCandles.length > 0 ? Math.max(...tokyoCandles.map((k: any) => k.high)) : 0;
+  const tokyoLow  = tokyoCandles.length > 0 ? Math.min(...tokyoCandles.map((k: any) => k.low))  : 0;
 
   const price = klines[klines.length - 1]?.close || 0;
 
@@ -1584,7 +1597,7 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
     return {
       symbol: ATM_SYMBOL, time: new Date().toISOString(), regime: state, price,
       direction: 'NEUTRAL', entry_low: 0, entry_high: 0, stop: 0, target: 0, rr: 0, logs,
-      atmDetails: { state, asiaHigh: 0, asiaLow: 0, bias: null, interactionType: null, ob: null, entry: 0, sl: 0, tp1: 0, tp2: 0, checklist: { rangeFormed: false, sweepOrBreakout: false, obFound: false, displaced: false, retest: false, wickRejection: false } },
+      atmDetails: { state, asiaHigh: 0, asiaLow: 0, tokyoHigh: 0, tokyoLow: 0, bias: null, interactionType: null, ob: null, entry: 0, sl: 0, tp1: 0, tp2: 0, checklist: { rangeFormed: false, sweepOrBreakout: false, obFound: false, displaced: false, retest: false, wickRejection: false } },
     };
   }
 
@@ -1596,7 +1609,7 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
     return {
       symbol: ATM_SYMBOL, time: new Date().toISOString(), regime: 'ASIA_RANGE_FORMING', price,
       direction: 'NEUTRAL', entry_low: 0, entry_high: 0, stop: 0, target: 0, rr: 0, logs: [...logs, '亞洲盤建立中...'],
-      atmDetails: { state: 'ASIA_RANGE_FORMING', asiaHigh, asiaLow, bias: null, interactionType: null, ob: null, entry: 0, sl: 0, tp1: 0, tp2: 0, checklist: { rangeFormed: true, sweepOrBreakout: false, obFound: false, displaced: false, retest: false, wickRejection: false } },
+      atmDetails: { state: 'ASIA_RANGE_FORMING', asiaHigh, asiaLow, tokyoHigh: 0, tokyoLow: 0, bias: null, interactionType: null, ob: null, entry: 0, sl: 0, tp1: 0, tp2: 0, checklist: { rangeFormed: true, sweepOrBreakout: false, obFound: false, displaced: false, retest: false, wickRejection: false } },
     };
   }
 
@@ -1652,7 +1665,7 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
       symbol: ATM_SYMBOL, time: new Date().toISOString(),
       regime: `ATM_${interactionType}_${bias}`, price, direction: bias,
       entry_low: entry, entry_high: entry, stop: sl, target: tp2, rr, logs,
-      atmDetails: { state: 'SIGNAL_FIRED', asiaHigh, asiaLow, bias, interactionType, ob, entry, sl, tp1, tp2, checklist },
+      atmDetails: { state: 'SIGNAL_FIRED', asiaHigh, asiaLow, tokyoHigh, tokyoLow, bias, interactionType, ob, entry, sl, tp1, tp2, checklist },
     };
   }
 
@@ -1663,7 +1676,7 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
     symbol: ATM_SYMBOL, time: new Date().toISOString(),
     regime: `ATM_${state}`, price, direction: 'NEUTRAL',
     entry_low: ob?.low || 0, entry_high: ob?.high || 0, stop: 0, target: 0, rr: 0, logs,
-    atmDetails: { state, asiaHigh, asiaLow, bias, interactionType, ob, entry: 0, sl: 0, tp1: bias === 'LONG' ? asiaHigh : (asiaLow || 0), tp2: 0, checklist },
+    atmDetails: { state, asiaHigh, asiaLow, tokyoHigh, tokyoLow, bias, interactionType, ob, entry: 0, sl: 0, tp1: bias === 'LONG' ? asiaHigh : (asiaLow || 0), tp2: 0, checklist },
   };
 }
 
