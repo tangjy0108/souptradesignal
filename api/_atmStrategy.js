@@ -207,19 +207,24 @@ export async function runATMScan(prevCtx = null) {
           ctx.ob = ob;
           ctx.state = 'WAITING_RETEST';
           ctx.displaced = false;
-          signal = {
-            type: 'OB_FOUND',
-            bias: ctx.bias,
-            interactionType: ctx.interactionType,
-            refHigh: candleRefHigh,
-            refLow: candleRefLow,
-            refName: candleRefName,
-            asiaHigh: ctx.asiaHigh,
-            asiaLow: ctx.asiaLow,
-            tokyoHigh: ctx.tokyoHigh,
-            tokyoLow: ctx.tokyoLow,
-            ob: ctx.ob,
-          };
+          // Only return signal if the interaction candle is fresh (< 5 min old).
+          // Prevents stateless replay from re-alerting on old detections every run.
+          const candleAgeMs = Date.now() - candle.time;
+          if (candleAgeMs < 5 * 60 * 1000) {
+            signal = {
+              type: 'OB_FOUND',
+              bias: ctx.bias,
+              interactionType: ctx.interactionType,
+              refHigh: candleRefHigh,
+              refLow: candleRefLow,
+              refName: candleRefName,
+              asiaHigh: ctx.asiaHigh,
+              asiaLow: ctx.asiaLow,
+              tokyoHigh: ctx.tokyoHigh,
+              tokyoLow: ctx.tokyoLow,
+              ob: ctx.ob,
+            };
+          }
         }
       }
     } else if (ctx.state === 'WAITING_RETEST' && ctx.ob) {

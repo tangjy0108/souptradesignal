@@ -1220,9 +1220,8 @@ export default function App() {
         strategyResult.killzoneDetails?.sweepExtreme, strategyResult.killzoneDetails?.fvgLow,
         strategyResult.killzoneDetails?.fvgHigh,
         strategyResult.atmDetails?.asiaHigh, strategyResult.atmDetails?.asiaLow,
-        strategyResult.atmDetails?.ob?.high, strategyResult.atmDetails?.ob?.low,
-        strategyResult.atmDetails?.tp1, strategyResult.atmDetails?.tp2,
-        strategyResult.atmDetails?.sl].filter(v => typeof v === 'number' && v > 0) as number[];
+        strategyResult.atmDetails?.tokyoHigh, strategyResult.atmDetails?.tokyoLow,
+        strategyResult.atmDetails?.ob?.high, strategyResult.atmDetails?.ob?.low].filter(v => typeof v === 'number' && v > 0) as number[];
       if (vals.length) { min = Math.min(min, ...vals); max = Math.max(max, ...vals); }
     }
     if (showSR) {
@@ -2373,20 +2372,12 @@ export default function App() {
                         Asia: {strategyResult.atmDetails.asiaLow.toFixed(2)} – {strategyResult.atmDetails.asiaHigh.toFixed(2)}
                       </div>
                     ) : null}
-                    {strategyResult.atmDetails.state === 'SIGNAL_FIRED' && strategyResult.atmDetails.tp1 > 0 && (
-                      <div className="grid grid-cols-2 gap-1 text-[10px]">
-                        <span className="text-[#787B86]">TP1 (Asia)</span>
-                        <span className="text-[#FFC107] font-mono text-right">{strategyResult.atmDetails.tp1.toFixed(2)}</span>
-                        <span className="text-[#787B86]">TP2 (1:2 R/R)</span>
-                        <span className="text-[#089981] font-mono text-right">{strategyResult.atmDetails.tp2.toFixed(2)}</span>
-                      </div>
-                    )}
                   </div>
                 )}
               </div>
             )}
             <div className="h-px bg-[#2A2E39]" />
-            <div className="space-y-2">
+            {strategyId !== 'atm_asia' && <div className="space-y-2">
               {[
                 { label: 'Entry Zone', node: <><PriceText price={strategyResult.entry_low} /> - <PriceText price={strategyResult.entry_high} /></>, color: 'text-white' },
                 { label: 'Target',    node: <PriceText price={strategyResult.target} />, color: 'text-[#089981]' },
@@ -2398,7 +2389,7 @@ export default function App() {
                   <span className={`text-sm font-mono text-right ${color}`}>{node}</span>
                 </div>
               ))}
-            </div>
+            </div>}
             {strategyResult.logs && strategyResult.logs.length > 0 && (
               <div className="mt-3">
                 <div className="flex items-center gap-2 mb-2">
@@ -2905,18 +2896,6 @@ export default function App() {
                     {strategyResult?.atmDetails?.ob && (
                       <ReferenceArea y1={strategyResult.atmDetails.ob.low} y2={strategyResult.atmDetails.ob.high}
                         {...({ fill: strategyResult.atmDetails.bias === 'LONG' ? '#089981' : '#F23645', fillOpacity: 0.25, stroke: strategyResult.atmDetails.bias === 'LONG' ? '#089981' : '#F23645', strokeWidth: 1.5 } as any)} />
-                    )}
-                    {strategyResult?.atmDetails?.state === 'SIGNAL_FIRED' && strategyResult.atmDetails.tp1 > 0 && (
-                      <ReferenceLine y={strategyResult.atmDetails.tp1} stroke="#FFC107" strokeDasharray="6 3" strokeWidth={1.5}
-                        label={{ position: 'insideTopLeft', value: 'TP1', fill: '#FFC107', fontSize: 11, fontWeight: 600 }} />
-                    )}
-                    {strategyResult?.atmDetails?.state === 'SIGNAL_FIRED' && strategyResult.atmDetails.tp2 > 0 && (
-                      <ReferenceLine y={strategyResult.atmDetails.tp2} stroke="#089981" strokeDasharray="4 4" strokeWidth={2}
-                        label={{ position: 'insideTopLeft', value: 'TP2 (1:2)', fill: '#089981', fontSize: 12, fontWeight: 700 }} />
-                    )}
-                    {strategyResult?.atmDetails?.state === 'SIGNAL_FIRED' && strategyResult.atmDetails.sl > 0 && (
-                      <ReferenceLine y={strategyResult.atmDetails.sl} stroke="#F23645" strokeDasharray="4 4" strokeWidth={1.5}
-                        label={{ position: 'insideBottomLeft', value: 'SL', fill: '#F23645', fontSize: 11, fontWeight: 600 }} />
                     )}
 
                     {/* BB */}
