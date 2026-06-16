@@ -1586,8 +1586,8 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
     const { minuteOfDay } = getATMTWParts(k.time);
     return minuteOfDay >= tokyoStart && minuteOfDay < tokyoEnd;
   });
-  const tokyoHigh = tokyoCandles.length > 0 ? Math.max(...tokyoCandles.map((k: any) => k.high)) : 0;
-  const tokyoLow  = tokyoCandles.length > 0 ? Math.min(...tokyoCandles.map((k: any) => k.low))  : 0;
+  const rawTokyoHigh = tokyoCandles.length > 0 ? Math.max(...tokyoCandles.map((k: any) => k.high)) : 0;
+  const rawTokyoLow  = tokyoCandles.length > 0 ? Math.min(...tokyoCandles.map((k: any) => k.low))  : 0;
 
   const price = klines[klines.length - 1]?.close || 0;
 
@@ -1604,6 +1604,12 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
   const asiaHigh = Math.max(...asiaCandles.map((k: any) => k.high));
   const asiaLow  = Math.min(...asiaCandles.map((k: any) => k.low));
   logs.push(`亞洲盤區間: ${asiaLow.toFixed(2)} – ${asiaHigh.toFixed(2)}`);
+
+  // Only use Tokyo range if it extends beyond Asia range (created new liquidity)
+  const postTokyo = nowTW.minuteOfDay >= tokyoEnd;
+  const tokyoExtends = rawTokyoHigh > asiaHigh || rawTokyoLow < asiaLow;
+  const tokyoHigh = postTokyo && tokyoExtends ? rawTokyoHigh : 0;
+  const tokyoLow  = postTokyo && tokyoExtends ? rawTokyoLow  : 0;
 
   if (nowTW.minuteOfDay < asiaEnd) {
     return {

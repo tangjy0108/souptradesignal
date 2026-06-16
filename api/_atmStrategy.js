@@ -153,7 +153,8 @@ export async function runATMScan(prevCtx = null) {
     ctx.tokyoLow  = Math.min(...tokyoCandles.map(k => k.low));
   }
   if (postTokyo && ctx.tokyoHigh) {
-    ctx.tokyoLocked = true;
+    const tokyoExtends = ctx.tokyoHigh > ctx.asiaHigh || ctx.tokyoLow < ctx.asiaLow;
+    ctx.tokyoLocked = tokyoExtends;
   }
 
   // Active reference range: Tokyo (if locked) else Asia
@@ -182,7 +183,8 @@ export async function runATMScan(prevCtx = null) {
     // Use active range at the time of this candle
     const candleInTokyo = candleTW.minuteOfDay >= tokyoStart && candleTW.minuteOfDay < tokyoEnd;
     const candlePostTokyo = candleTW.minuteOfDay >= tokyoEnd;
-    const candleTokyoLocked = candlePostTokyo && ctx.tokyoHigh;
+    const candleTokyoExtends = ctx.tokyoHigh > ctx.asiaHigh || ctx.tokyoLow < ctx.asiaLow;
+    const candleTokyoLocked = candlePostTokyo && ctx.tokyoHigh && candleTokyoExtends;
     const candleRefHigh = candleTokyoLocked ? ctx.tokyoHigh : ctx.asiaHigh;
     const candleRefLow  = candleTokyoLocked ? ctx.tokyoLow  : ctx.asiaLow;
     const candleRefName = candleTokyoLocked ? 'Tokyo' : 'Asia';
