@@ -35,6 +35,7 @@ function getKZWindows() {
     asiaEnd:    isWinter ? 8 * 60 : 7 * 60,
     tokyoStart: isWinter ? 10 * 60 : 9 * 60,
     tokyoEnd:   isWinter ? 11 * 60 : 10 * 60,
+    usStart:    isWinter ? 22 * 60 + 30 : 21 * 60 + 30,
   };
 }
 
@@ -103,7 +104,7 @@ function detectWickRejection(candle, ob, bias) {
 export async function runATMScan(prevCtx = null) {
   const now = new Date();
   const tw = getTWParts(now);
-  const { asiaStart, asiaEnd, tokyoStart, tokyoEnd } = getKZWindows();
+  const { asiaStart, asiaEnd, tokyoStart, tokyoEnd, usStart } = getKZWindows();
 
   let ctx = prevCtx && prevCtx.dateKey === tw.dateKey ? { ...prevCtx } : {
     dateKey: tw.dateKey,
@@ -115,9 +116,10 @@ export async function runATMScan(prevCtx = null) {
     displaced: false,
   };
 
-  const inAsia  = tw.minuteOfDay >= asiaStart  && tw.minuteOfDay < asiaEnd;
-  const inTokyo = tw.minuteOfDay >= tokyoStart && tw.minuteOfDay < tokyoEnd;
+  const inAsia   = tw.minuteOfDay >= asiaStart  && tw.minuteOfDay < asiaEnd;
+  const inTokyo  = tw.minuteOfDay >= tokyoStart && tw.minuteOfDay < tokyoEnd;
   const postTokyo = tw.minuteOfDay >= tokyoEnd;
+  const pastUS   = tw.minuteOfDay >= usStart;
 
   const klines = await fetchBingxKlines(ATM_SYMBOL, '1m', 300);
   if (!klines || klines.length < 10) return { ctx, signal: null };
@@ -142,6 +144,9 @@ export async function runATMScan(prevCtx = null) {
 
   if (!ctx.asiaHigh || !ctx.asiaLow) return { ctx, signal: null };
   if (ctx.state === 'IDLE') ctx.state = 'ASIA_RANGE_LOCKED';
+
+  // US session opened — monitoring done for today
+  if (pastUS) return { ctx, signal: null };
 
   // Derive Tokyo range from today's Tokyo candles
   const tokyoCandles = todayKlines.filter(k => {
@@ -179,6 +184,9 @@ export async function runATMScan(prevCtx = null) {
   for (let i = asiaCandles.length; i < allCandles.length; i++) {
     const candle = allCandles[i];
     const candleTW = getTWParts(new Date(candle.time));
+
+    // Stop replaying historical candles once US session opens
+    if (candleTW.minuteOfDay >= usStart) break;
 
     // Use active range at the time of this candle
     const candleInTokyo = candleTW.minuteOfDay >= tokyoStart && candleTW.minuteOfDay < tokyoEnd;
