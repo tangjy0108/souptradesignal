@@ -125,8 +125,13 @@ export async function runATMScan(prevCtx = null) {
   const klines = await fetchBingxKlines(ATM_SYMBOL, '1m', 300);
   if (!klines || klines.length < 10) return { ctx, signal: null };
 
+  const klines5m = await fetchBingxKlines(ATM_SYMBOL, '5m', 60);
+
   const todayKey = tw.dateKey;
-  const todayKlines = klines.filter(k => getTWParts(new Date(k.time)).dateKey === todayKey);
+  const todayKlines   = klines.filter(k => getTWParts(new Date(k.time)).dateKey === todayKey);
+  const todayKlines5m = klines5m
+    ? klines5m.filter(k => getTWParts(new Date(k.time)).dateKey === todayKey)
+    : [];
 
   // Always derive Asia range from today's Asia candles
   const asiaCandles = todayKlines.filter(k => {
@@ -180,6 +185,12 @@ export async function runATMScan(prevCtx = null) {
   });
 
   const allCandles = [...asiaCandles, ...postAsiaCandles];
+
+  // 5m candle set for post-Tokyo OB finding (matches Python bot's 1m→5m switch at Tokyo close)
+  const asiaCandles5m     = todayKlines5m.filter(k => { const { minuteOfDay } = getTWParts(new Date(k.time)); return minuteOfDay >= asiaStart && minuteOfDay < asiaEnd; });
+  const postAsiaCandles5m = todayKlines5m.filter(k => { const { minuteOfDay } = getTWParts(new Date(k.time)); return minuteOfDay >= asiaEnd && minuteOfDay < usStart; });
+  const allCandles5m = [...asiaCandles5m, ...postAsiaCandles5m];
+
   let signal = null;
 
   for (let i = asiaCandles.length; i < allCandles.length; i++) {
@@ -237,11 +248,19 @@ export async function runATMScan(prevCtx = null) {
       const choch = (ctx.bias === 'LONG' && candle.close > ctx.interactionCandleHigh) ||
                     (ctx.bias === 'SHORT' && candle.close < ctx.interactionCandleLow);
       if (choch) {
-        const ob = findOB(allCandles, ctx.bias, i);
+        // Post-Tokyo: use 5m OB (matching Python bot behavior); pre-Tokyo: use 1m
+        let obCandles = allCandles, obIdx = i;
+        if (candlePostTokyo && allCandles5m.length > 0) {
+          let j = allCandles5m.length - 1;
+          while (j > 0 && allCandles5m[j].time > candle.time) j--;
+          obCandles = allCandles5m; obIdx = j;
+        }
+        const obTimeframe = candlePostTokyo ? '5m' : '1m';
+        const ob = findOB(obCandles, ctx.bias, obIdx);
         if (ob) {
-          ctx.ob = ob; ctx.displaced = true; ctx.state = 'WAITING_RETEST';
+          ctx.ob = { ...ob, obTimeframe }; ctx.displaced = true; ctx.state = 'WAITING_RETEST';
           const candleAgeMs = Date.now() - candle.time;
-          if (candleAgeMs < 5 * 60 * 1000) signal = { type: 'CHOCH_CONFIRMED', bias: ctx.bias, interactionType: ctx.interactionType, refHigh: candleRefHigh, refLow: candleRefLow, refName: candleRefName, asiaHigh: ctx.asiaHigh, asiaLow: ctx.asiaLow, tokyoHigh: ctx.tokyoHigh, tokyoLow: ctx.tokyoLow, ob };
+          if (candleAgeMs < 5 * 60 * 1000) signal = { type: 'CHOCH_CONFIRMED', bias: ctx.bias, interactionType: ctx.interactionType, refHigh: candleRefHigh, refLow: candleRefLow, refName: candleRefName, asiaHigh: ctx.asiaHigh, asiaLow: ctx.asiaLow, tokyoHigh: ctx.tokyoHigh, tokyoLow: ctx.tokyoLow, ob: ctx.ob };
         } else {
           ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.bias = null;
         }
@@ -302,7 +321,7 @@ export function buildATMTelegramMessage(signal, twTime) {
       '',
       `${rangeEmoji} ${rangeLabel} High：<code>${signal.refHigh?.toFixed(2)}</code>`,
       `${rangeEmoji} ${rangeLabel} Low：<code>${signal.refLow?.toFixed(2)}</code>`,
-      `📦 OB 區間：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
+      `📦 OB（${signal.ob?.obTimeframe || '1m'}）：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
       `等待回踩 OB...`,
       '',
       `⏰ TW ${twTime}`,
@@ -313,7 +332,7 @@ export function buildATMTelegramMessage(signal, twTime) {
     return [
       `${emoji} <b>ATM 回踩 OB — ${signal.bias}</b>`,
       '',
-      `📦 OB 區間：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
+      `📦 OB（${signal.ob?.obTimeframe || '1m'}）：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
       `等待 Wick Rejection...`,
       '',
       `⏰ TW ${twTime}`,
@@ -327,7 +346,7 @@ export function buildATMTelegramMessage(signal, twTime) {
       '',
       `${rangeEmoji} ${rangeLabel} High：<code>${signal.refHigh?.toFixed(2)}</code>`,
       `${rangeEmoji} ${rangeLabel} Low：<code>${signal.refLow?.toFixed(2)}</code>`,
-      `📦 OB 區間：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
+      `📦 OB（${signal.ob?.obTimeframe || '1m'}）：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
       `✅ 進場訊號確認`,
       '',
       `⏰ TW ${twTime}`,
