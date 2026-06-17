@@ -1,7 +1,7 @@
 import type { Kline } from '../hooks/useKlines';
 import { calculateEMA, calculateATR, calculateADX, calculateRSI } from './indicators';
 
-export type ATMState = 'IDLE' | 'ASIA_RANGE_FORMING' | 'ASIA_RANGE_LOCKED' | 'WAITING_RETEST' | 'WAITING_WICK' | 'SIGNAL_FIRED';
+export type ATMState = 'IDLE' | 'ASIA_RANGE_FORMING' | 'ASIA_RANGE_LOCKED' | 'WAITING_BREAKOUT_CONFIRM' | 'WAITING_CHOCH' | 'WAITING_RETEST' | 'WAITING_WICK' | 'SIGNAL_FIRED';
 
 export type StrategyResult = {
   symbol: string;
@@ -1642,6 +1642,7 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
   let ob: { high: number; low: number; mid: number } | null = null;
   let displaced = false;
   let entry = 0, sl = 0, tp1 = 0, tp2 = 0;
+  let interactionCandleHigh = 0, interactionCandleLow = 0;
 
   for (let i = asiaCandles.length; i < allCandles.length; i++) {
     const c = allCandles[i];
@@ -1652,13 +1653,30 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
       if (c.high > asiaHigh) { nb = c.close <= asiaHigh ? 'SHORT' : 'LONG'; ni = c.close <= asiaHigh ? 'SWEEP' : 'BREAKOUT'; }
       else if (c.low < asiaLow) { nb = c.close >= asiaLow ? 'LONG' : 'SHORT'; ni = c.close >= asiaLow ? 'SWEEP' : 'BREAKOUT'; }
       if (nb) {
-        const foundOB = findATMOrderBlock(allCandles, nb, i);
-        if (foundOB) { bias = nb; interactionType = ni; ob = foundOB; state = 'WAITING_RETEST'; displaced = false; logs.push(`${ni} 偵測 (${nb}), OB: ${foundOB.low.toFixed(2)}–${foundOB.high.toFixed(2)}`); }
+        bias = nb; interactionType = ni;
+        interactionCandleHigh = c.high; interactionCandleLow = c.low;
+        state = ni === 'SWEEP' ? 'WAITING_CHOCH' : 'WAITING_BREAKOUT_CONFIRM';
+        logs.push(`${ni} 偵測 (${nb}) — 等待 CHoCH`);
+      }
+    } else if (state === 'WAITING_BREAKOUT_CONFIRM') {
+      const recovered = (bias === 'LONG' && c.close < asiaHigh) || (bias === 'SHORT' && c.close > asiaLow);
+      if (recovered) bias = bias === 'LONG' ? 'SHORT' : 'LONG';
+      interactionCandleHigh = c.high; interactionCandleLow = c.low;
+      interactionType = recovered ? 'SWEEP' : 'BREAKOUT';
+      state = 'WAITING_CHOCH';
+    } else if (state === 'WAITING_CHOCH') {
+      const invalid = (bias === 'LONG' && c.close < interactionCandleLow) || (bias === 'SHORT' && c.close > interactionCandleHigh);
+      if (invalid) { state = 'ASIA_RANGE_LOCKED'; bias = null; ob = null; interactionCandleHigh = 0; interactionCandleLow = 0; continue; }
+      const choch = (bias === 'LONG' && c.close > interactionCandleHigh) || (bias === 'SHORT' && c.close < interactionCandleLow);
+      if (choch) {
+        const foundOB = findATMOrderBlock(allCandles, bias!, i);
+        if (foundOB) { ob = foundOB; displaced = true; state = 'WAITING_RETEST'; logs.push(`CHoCH 確認 (${bias}), OB: ${foundOB.low.toFixed(2)}–${foundOB.high.toFixed(2)}`); }
+        else { state = 'ASIA_RANGE_LOCKED'; bias = null; }
       }
     } else if (state === 'WAITING_RETEST' && ob) {
       if ((bias === 'LONG' && c.close < ob.low) || (bias === 'SHORT' && c.close > ob.high)) { state = 'ASIA_RANGE_LOCKED'; bias = null; ob = null; displaced = false; continue; }
-      if (!displaced) { if ((bias === 'LONG' && c.close > ob.high) || (bias === 'SHORT' && c.close < ob.low)) displaced = true; }
-      else if (c.low <= ob.high && c.high >= ob.low) { state = 'WAITING_WICK'; logs.push('回踩 OB 中'); }
+      // displaced=true from CHoCH
+      if (c.low <= ob.high && c.high >= ob.low) { state = 'WAITING_WICK'; logs.push('回踩 OB 中'); }
     } else if (state === 'WAITING_WICK' && ob) {
       if ((bias === 'LONG' && c.close < ob.low) || (bias === 'SHORT' && c.close > ob.high)) { state = 'ASIA_RANGE_LOCKED'; bias = null; ob = null; displaced = false; continue; }
       const bSz = Math.abs(c.close - c.open);
@@ -1689,7 +1707,7 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
     };
   }
 
-  const stateLabels: Record<ATMState, string> = { IDLE: '等待', ASIA_RANGE_FORMING: '亞洲盤建立中', ASIA_RANGE_LOCKED: '區間鎖定，等待互動', WAITING_RETEST: `OB 等待回踩 (${bias || ''})`, WAITING_WICK: '等待影線拒絕', SIGNAL_FIRED: '訊號已觸發' };
+  const stateLabels: Record<ATMState, string> = { IDLE: '等待', ASIA_RANGE_FORMING: '亞洲盤建立中', ASIA_RANGE_LOCKED: '區間鎖定，等待互動', WAITING_BREAKOUT_CONFIRM: '突破確認中（等1根）', WAITING_CHOCH: `等待 CHoCH (${bias || ''})`, WAITING_RETEST: `等待回踩 OB (${bias || ''})`, WAITING_WICK: '等待影線拒絕', SIGNAL_FIRED: '訊號已觸發' };
   logs.push(`狀態: ${stateLabels[state]}`);
 
   return {

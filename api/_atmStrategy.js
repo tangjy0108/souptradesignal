@@ -114,6 +114,7 @@ export async function runATMScan(prevCtx = null) {
     tokyoLocked: false,
     bias: null, interactionType: null, ob: null,
     displaced: false,
+    interactionCandleHigh: null, interactionCandleLow: null,
   };
 
   const inAsia   = tw.minuteOfDay >= asiaStart  && tw.minuteOfDay < asiaEnd;
@@ -210,54 +211,57 @@ export async function runATMScan(prevCtx = null) {
         newInteraction = candle.close >= candleRefLow ? 'SWEEP' : 'BREAKOUT';
       }
       if (newBias) {
-        const ob = findOB(allCandles, newBias, i);
-        if (ob) {
-          ctx.bias = newBias;
-          ctx.interactionType = newInteraction;
-          ctx.ob = ob;
-          ctx.state = 'WAITING_RETEST';
-          ctx.displaced = false;
-          // Only return signal if the interaction candle is fresh (< 5 min old).
-          // Prevents stateless replay from re-alerting on old detections every run.
+        ctx.bias = newBias; ctx.interactionType = newInteraction;
+        ctx.interactionCandleHigh = candle.high; ctx.interactionCandleLow = candle.low;
+        if (newInteraction === 'SWEEP') {
+          ctx.state = 'WAITING_CHOCH';
           const candleAgeMs = Date.now() - candle.time;
-          if (candleAgeMs < 5 * 60 * 1000) {
-            signal = {
-              type: 'OB_FOUND',
-              bias: ctx.bias,
-              interactionType: ctx.interactionType,
-              refHigh: candleRefHigh,
-              refLow: candleRefLow,
-              refName: candleRefName,
-              asiaHigh: ctx.asiaHigh,
-              asiaLow: ctx.asiaLow,
-              tokyoHigh: ctx.tokyoHigh,
-              tokyoLow: ctx.tokyoLow,
-              ob: ctx.ob,
-            };
-          }
+          if (candleAgeMs < 5 * 60 * 1000) signal = { type: 'INTERACTION_DETECTED', bias: newBias, interactionType: newInteraction, refHigh: candleRefHigh, refLow: candleRefLow, refName: candleRefName, asiaHigh: ctx.asiaHigh, asiaLow: ctx.asiaLow, tokyoHigh: ctx.tokyoHigh, tokyoLow: ctx.tokyoLow };
+        } else {
+          ctx.state = 'WAITING_BREAKOUT_CONFIRM'; // wait 1 candle
+        }
+      }
+    } else if (ctx.state === 'WAITING_BREAKOUT_CONFIRM') {
+      const recovered = (ctx.bias === 'LONG' && candle.close < ctx.refHigh) ||
+                        (ctx.bias === 'SHORT' && candle.close > ctx.refLow);
+      if (recovered) ctx.bias = ctx.bias === 'LONG' ? 'SHORT' : 'LONG';
+      ctx.interactionCandleHigh = candle.high; ctx.interactionCandleLow = candle.low;
+      ctx.interactionType = recovered ? 'SWEEP' : 'BREAKOUT';
+      ctx.state = 'WAITING_CHOCH';
+      const candleAgeMs = Date.now() - candle.time;
+      if (candleAgeMs < 5 * 60 * 1000) signal = { type: 'INTERACTION_DETECTED', bias: ctx.bias, interactionType: ctx.interactionType, recovered, refHigh: candleRefHigh, refLow: candleRefLow, refName: candleRefName, asiaHigh: ctx.asiaHigh, asiaLow: ctx.asiaLow, tokyoHigh: ctx.tokyoHigh, tokyoLow: ctx.tokyoLow };
+    } else if (ctx.state === 'WAITING_CHOCH') {
+      const invalidated = (ctx.bias === 'LONG' && candle.close < ctx.interactionCandleLow) ||
+                          (ctx.bias === 'SHORT' && candle.close > ctx.interactionCandleHigh);
+      if (invalidated) { ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.bias = null; signal = null; continue; }
+      const choch = (ctx.bias === 'LONG' && candle.close > ctx.interactionCandleHigh) ||
+                    (ctx.bias === 'SHORT' && candle.close < ctx.interactionCandleLow);
+      if (choch) {
+        const ob = findOB(allCandles, ctx.bias, i);
+        if (ob) {
+          ctx.ob = ob; ctx.displaced = true; ctx.state = 'WAITING_RETEST';
+          const candleAgeMs = Date.now() - candle.time;
+          if (candleAgeMs < 5 * 60 * 1000) signal = { type: 'CHOCH_CONFIRMED', bias: ctx.bias, interactionType: ctx.interactionType, refHigh: candleRefHigh, refLow: candleRefLow, refName: candleRefName, asiaHigh: ctx.asiaHigh, asiaLow: ctx.asiaLow, tokyoHigh: ctx.tokyoHigh, tokyoLow: ctx.tokyoLow, ob };
+        } else {
+          ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.bias = null;
         }
       }
     } else if (ctx.state === 'WAITING_RETEST' && ctx.ob) {
       if (obInvalidated(candle, ctx.ob, ctx.bias)) {
-        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false;
-        signal = null; continue;
+        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false; signal = null; continue;
       }
-      if (!ctx.displaced) {
-        if ((ctx.bias === 'LONG' && candle.close > ctx.ob.high) || (ctx.bias === 'SHORT' && candle.close < ctx.ob.low)) {
-          ctx.displaced = true;
-        }
-      } else if (candle.low <= ctx.ob.high && candle.high >= ctx.ob.low) {
+      // displaced=true from CHoCH — go straight to zone check
+      if (candle.low <= ctx.ob.high && candle.high >= ctx.ob.low) {
         ctx.state = 'WAITING_WICK';
+        const candleAgeMs = Date.now() - candle.time;
+        if (candleAgeMs < 5 * 60 * 1000) signal = { type: 'OB_RETEST', bias: ctx.bias, refHigh: candleRefHigh, refLow: candleRefLow, refName: candleRefName, asiaHigh: ctx.asiaHigh, asiaLow: ctx.asiaLow, tokyoHigh: ctx.tokyoHigh, tokyoLow: ctx.tokyoLow, ob: ctx.ob };
       }
     } else if (ctx.state === 'WAITING_WICK' && ctx.ob) {
       if (obInvalidated(candle, ctx.ob, ctx.bias)) {
-        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false;
-        signal = null; continue;
+        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false; signal = null; continue;
       }
-      // Wick rejection detected — Python bot handles final signal; just reset to watch for new OB
       if (detectWickRejection(candle, ctx.ob, ctx.bias)) {
-        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false;
-        signal = null;
+        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false; signal = null;
       }
     }
   }
@@ -266,19 +270,50 @@ export async function runATMScan(prevCtx = null) {
 }
 
 export function buildATMTelegramMessage(signal, twTime) {
-  if (!signal || signal.type !== 'OB_FOUND') return null;
+  if (!signal) return null;
   const emoji = signal.bias === 'LONG' ? '🟢' : '🔴';
   const rangeEmoji = signal.refName === 'Tokyo' ? '🗼' : '🌏';
   const rangeLabel = signal.refName === 'Tokyo' ? '日盤' : '亞洲盤';
   const interactionLabel = signal.interactionType === 'SWEEP' ? '假突破 (Sweep)' : '突破 (Breakout)';
-  return [
-    `${emoji} <b>NASDAQ100USD ATM — OB 發現</b>`,
-    `方向：<b>${signal.bias}</b> | ${interactionLabel}`,
-    '',
-    `${rangeEmoji} ${rangeLabel} High：<code>${signal.refHigh?.toFixed(2)}</code>`,
-    `${rangeEmoji} ${rangeLabel} Low：<code>${signal.refLow?.toFixed(2)}</code>`,
-    `📦 OB 區間：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
-    '',
-    `⏰ TW ${twTime}`,
-  ].join('\n');
+
+  if (signal.type === 'INTERACTION_DETECTED') {
+    const recoveredNote = signal.recovered ? ' → 假突破回來' : '';
+    return [
+      `${emoji} <b>ATM 互動偵測 — ${signal.bias}</b>`,
+      `模式：${interactionLabel}${recoveredNote}`,
+      '',
+      `${rangeEmoji} ${rangeLabel} High：<code>${signal.refHigh?.toFixed(2)}</code>`,
+      `${rangeEmoji} ${rangeLabel} Low：<code>${signal.refLow?.toFixed(2)}</code>`,
+      `等待 CHoCH（結構轉換）...`,
+      '',
+      `⏰ TW ${twTime}`,
+    ].join('\n');
+  }
+
+  if (signal.type === 'CHOCH_CONFIRMED') {
+    return [
+      `${emoji} <b>ATM CHoCH 確認 — ${signal.bias}</b>`,
+      `模式：${interactionLabel}`,
+      '',
+      `${rangeEmoji} ${rangeLabel} High：<code>${signal.refHigh?.toFixed(2)}</code>`,
+      `${rangeEmoji} ${rangeLabel} Low：<code>${signal.refLow?.toFixed(2)}</code>`,
+      `📦 OB 區間：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
+      `等待回踩 OB...`,
+      '',
+      `⏰ TW ${twTime}`,
+    ].join('\n');
+  }
+
+  if (signal.type === 'OB_RETEST') {
+    return [
+      `${emoji} <b>ATM 回踩 OB — ${signal.bias}</b>`,
+      '',
+      `📦 OB 區間：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
+      `等待 Wick Rejection...`,
+      '',
+      `⏰ TW ${twTime}`,
+    ].join('\n');
+  }
+
+  return null;
 }

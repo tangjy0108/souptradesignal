@@ -853,31 +853,53 @@ export default async function handler(req, res) {
       if (atmResult.signal) {
         const sig = atmResult.signal;
         const twDateKey = getTimePartsInZone(now, 'Asia/Taipei').dateKey;
-        const obStr = sig.ob ? `${sig.ob.low?.toFixed(2)}-${sig.ob.high?.toFixed(2)}` : 'noob';
-        const atmSignalKey = `atm_asia|${twDateKey}|OB_FOUND|${sig.bias}|${obStr}`;
+        const atmMsg = buildATMTelegramMessage(sig, twTime);
 
-        const existing = await listSignalsByKeys([atmSignalKey]).catch(() => []);
-        if (existing.length === 0) {
-          atmSignal = sig;
-          const atmMsg = buildATMTelegramMessage(sig, twTime);
+        if (sig.type === 'CHOCH_CONFIRMED') {
+          // CHoCH confirmed + OB found: store in DB + send TG
+          const obStr = sig.ob ? `${sig.ob.low?.toFixed(2)}-${sig.ob.high?.toFixed(2)}` : 'noob';
+          const atmSignalKey = `atm_asia|${twDateKey}|CHOCH|${sig.bias}|${obStr}`;
+          const existing = await listSignalsByKeys([atmSignalKey]).catch(() => []);
+          if (existing.length === 0) {
+            atmSignal = sig;
+            if (atmMsg) {
+              await safeSendTelegram(atmMsg, sendErrors, 'atm');
+              await upsertSignalsWithMeta([{
+                signalKey: atmSignalKey,
+                symbol: ATM_SYMBOL,
+                strategyId: 'atm_asia',
+                strategyName: 'ATM Asia',
+                direction: sig.bias,
+                status: 'OPEN',
+                lifecycleState: 'CHOCH_CONFIRMED',
+                entryLow: sig.ob?.low || 0,
+                entryHigh: sig.ob?.high || 0,
+                stop: 0, target: 0, rr: 0, marketPrice: 0,
+                updatedAt: now.toISOString(),
+              }]).catch(() => {});
+            }
+          }
+        } else if (sig.type === 'INTERACTION_DETECTED' || sig.type === 'OB_RETEST') {
+          // Informational only: TG notification, no DB write
           if (atmMsg) {
-            await safeSendTelegram(atmMsg, sendErrors, 'atm');
-            await upsertSignalsWithMeta([{
-              signalKey: atmSignalKey,
-              symbol: ATM_SYMBOL,
-              strategyId: 'atm_asia',
-              strategyName: 'ATM Asia',
-              direction: sig.bias,
-              status: 'OPEN',
-              lifecycleState: 'OB_FOUND',
-              entryLow: 0,
-              entryHigh: 0,
-              stop: 0,
-              target: 0,
-              rr: 0,
-              marketPrice: 0,
-              updatedAt: now.toISOString(),
-            }]).catch(() => {});
+            const notifyKey = `atm_asia|${twDateKey}|${sig.type}|${sig.bias}`;
+            const existing = await listSignalsByKeys([notifyKey]).catch(() => []);
+            if (existing.length === 0) {
+              atmSignal = sig;
+              await safeSendTelegram(atmMsg, sendErrors, 'atm');
+              // Store a lightweight record to prevent re-notification
+              await upsertSignalsWithMeta([{
+                signalKey: notifyKey,
+                symbol: ATM_SYMBOL,
+                strategyId: 'atm_asia',
+                strategyName: 'ATM Asia',
+                direction: sig.bias,
+                status: 'OPEN',
+                lifecycleState: sig.type,
+                entryLow: 0, entryHigh: 0, stop: 0, target: 0, rr: 0, marketPrice: 0,
+                updatedAt: now.toISOString(),
+              }]).catch(() => {});
+            }
           }
         }
       }
