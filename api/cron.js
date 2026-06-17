@@ -879,6 +879,30 @@ export default async function handler(req, res) {
               }]).catch(() => {});
             }
           }
+        } else if (sig.type === 'SIGNAL_FIRED') {
+          // Wick rejection confirmed: TG + DB
+          const obStr = sig.ob ? `${sig.ob.low?.toFixed(2)}-${sig.ob.high?.toFixed(2)}` : 'noob';
+          const signalKey = `atm_asia|${twDateKey}|SIGNAL|${sig.bias}|${obStr}`;
+          const existing = await listSignalsByKeys([signalKey]).catch(() => []);
+          if (existing.length === 0) {
+            atmSignal = sig;
+            if (atmMsg) {
+              await safeSendTelegram(atmMsg, sendErrors, 'atm');
+              await upsertSignalsWithMeta([{
+                signalKey,
+                symbol: ATM_SYMBOL,
+                strategyId: 'atm_asia',
+                strategyName: 'ATM Asia',
+                direction: sig.bias,
+                status: 'OPEN',
+                lifecycleState: 'SIGNAL_FIRED',
+                entryLow: sig.ob?.low || 0,
+                entryHigh: sig.ob?.high || 0,
+                stop: 0, target: 0, rr: 0, marketPrice: 0,
+                updatedAt: now.toISOString(),
+              }]).catch(() => {});
+            }
+          }
         } else if (sig.type === 'INTERACTION_DETECTED' || sig.type === 'OB_RETEST') {
           // Informational only: TG notification, no DB write
           if (atmMsg) {

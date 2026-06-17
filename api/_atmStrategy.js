@@ -222,8 +222,8 @@ export async function runATMScan(prevCtx = null) {
         }
       }
     } else if (ctx.state === 'WAITING_BREAKOUT_CONFIRM') {
-      const recovered = (ctx.bias === 'LONG' && candle.close < ctx.refHigh) ||
-                        (ctx.bias === 'SHORT' && candle.close > ctx.refLow);
+      const recovered = (ctx.bias === 'LONG' && candle.close < candleRefHigh) ||
+                        (ctx.bias === 'SHORT' && candle.close > candleRefLow);
       if (recovered) ctx.bias = ctx.bias === 'LONG' ? 'SHORT' : 'LONG';
       ctx.interactionCandleHigh = candle.high; ctx.interactionCandleLow = candle.low;
       ctx.interactionType = recovered ? 'SWEEP' : 'BREAKOUT';
@@ -248,7 +248,7 @@ export async function runATMScan(prevCtx = null) {
       }
     } else if (ctx.state === 'WAITING_RETEST' && ctx.ob) {
       if (obInvalidated(candle, ctx.ob, ctx.bias)) {
-        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false; signal = null; continue;
+        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false; ctx.bias = null; signal = null; continue;
       }
       // displaced=true from CHoCH — go straight to zone check
       if (candle.low <= ctx.ob.high && candle.high >= ctx.ob.low) {
@@ -258,10 +258,15 @@ export async function runATMScan(prevCtx = null) {
       }
     } else if (ctx.state === 'WAITING_WICK' && ctx.ob) {
       if (obInvalidated(candle, ctx.ob, ctx.bias)) {
-        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false; signal = null; continue;
+        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false; ctx.bias = null; signal = null; continue;
       }
       if (detectWickRejection(candle, ctx.ob, ctx.bias)) {
-        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false; signal = null;
+        const ob = ctx.ob; const bias = ctx.bias; const interactionType = ctx.interactionType;
+        ctx.state = 'ASIA_RANGE_LOCKED'; ctx.ob = null; ctx.displaced = false; ctx.bias = null;
+        const candleAgeMs = Date.now() - candle.time;
+        signal = candleAgeMs < 5 * 60 * 1000
+          ? { type: 'SIGNAL_FIRED', bias, ob, interactionType, refHigh: candleRefHigh, refLow: candleRefLow, refName: candleRefName, asiaHigh: ctx.asiaHigh, asiaLow: ctx.asiaLow, tokyoHigh: ctx.tokyoHigh, tokyoLow: ctx.tokyoLow }
+          : null;
       }
     }
   }
@@ -310,6 +315,20 @@ export function buildATMTelegramMessage(signal, twTime) {
       '',
       `📦 OB 區間：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
       `等待 Wick Rejection...`,
+      '',
+      `⏰ TW ${twTime}`,
+    ].join('\n');
+  }
+
+  if (signal.type === 'SIGNAL_FIRED') {
+    return [
+      `${emoji} <b>ATM 影線拒絕確認 — ${signal.bias}</b>`,
+      `模式：${interactionLabel}`,
+      '',
+      `${rangeEmoji} ${rangeLabel} High：<code>${signal.refHigh?.toFixed(2)}</code>`,
+      `${rangeEmoji} ${rangeLabel} Low：<code>${signal.refLow?.toFixed(2)}</code>`,
+      `📦 OB 區間：<code>${signal.ob?.low?.toFixed(2)} – ${signal.ob?.high?.toFixed(2)}</code>`,
+      `✅ 進場訊號確認`,
       '',
       `⏰ TW ${twTime}`,
     ].join('\n');
