@@ -1550,6 +1550,7 @@ function getATMKZWindows() {
     asiaEnd:    isWinter ? 8 * 60 : 7 * 60,
     tokyoStart: isWinter ? 10 * 60 : 9 * 60,
     tokyoEnd:   isWinter ? 11 * 60 : 10 * 60,
+    usStart:    isWinter ? 22 * 60 + 30 : 21 * 60 + 30,
   };
 }
 
@@ -1575,7 +1576,7 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
   const now = Date.now();
   const nowTW = getATMTWParts(now);
   const todayKey = nowTW.dateKey;
-  const { asiaStart, asiaEnd, tokyoStart, tokyoEnd } = getATMKZWindows();
+  const { asiaStart, asiaEnd, tokyoStart, tokyoEnd, usStart } = getATMKZWindows();
 
   const todayKlines = klines.filter((k: any) => getATMTWParts(k.time).dateKey === todayKey);
   const asiaCandles = todayKlines.filter((k: any) => {
@@ -1619,7 +1620,20 @@ async function runATMAsiaStrategy(): Promise<StrategyResult> {
     };
   }
 
-  const postAsiaCandles = todayKlines.filter((k: any) => getATMTWParts(k.time).minuteOfDay >= asiaEnd);
+  // US session opened — monitoring done for today
+  if (nowTW.minuteOfDay >= usStart) {
+    return {
+      symbol: ATM_SYMBOL, time: new Date().toISOString(),
+      regime: 'ATM_US_OPEN', price, direction: 'NEUTRAL',
+      entry_low: 0, entry_high: 0, stop: 0, target: 0, rr: 0, logs: [...logs, '美盤開始，今日監控已結束'],
+      atmDetails: { state: 'IDLE', asiaHigh, asiaLow, tokyoHigh, tokyoLow, bias: null, interactionType: null, ob: null, entry: 0, sl: 0, tp1: 0, tp2: 0, checklist: { rangeFormed: true, sweepOrBreakout: false, obFound: false, displaced: false, retest: false, wickRejection: false } },
+    };
+  }
+
+  const postAsiaCandles = todayKlines.filter((k: any) => {
+    const { minuteOfDay } = getATMTWParts(k.time);
+    return minuteOfDay >= asiaEnd && minuteOfDay < usStart;
+  });
   const allCandles = [...asiaCandles, ...postAsiaCandles];
 
   let state: ATMState = 'ASIA_RANGE_LOCKED';

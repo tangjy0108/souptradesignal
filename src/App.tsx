@@ -2824,11 +2824,11 @@ export default function App() {
                       <ReferenceArea y1={strategyResult.entry_low} y2={strategyResult.entry_high}
                         {...({ fill: strategyResult.direction === 'LONG' ? '#089981' : '#F23645', fillOpacity: 0.15, stroke: 'none' } as any)} />
                     )}
-                    {strategyResult && strategyResult.stop > 0 && (
+                    {strategyId !== 'atm_asia' && strategyResult && strategyResult.stop > 0 && (
                       <ReferenceLine y={strategyResult.stop} stroke="#F23645" strokeDasharray="4 4" strokeWidth={1.5}
                         label={{ position: 'insideBottomLeft', value: 'Stop', fill: '#F23645', fontSize: 12, fontWeight: 600 }} />
                     )}
-                    {strategyResult && strategyResult.target > 0 && (
+                    {strategyId !== 'atm_asia' && strategyResult && strategyResult.target > 0 && (
                       <ReferenceLine y={strategyResult.target} stroke="#089981" strokeDasharray="4 4" strokeWidth={1.5}
                         label={{ position: 'insideTopLeft', value: 'Target', fill: '#089981', fontSize: 12, fontWeight: 600 }} />
                     )}
